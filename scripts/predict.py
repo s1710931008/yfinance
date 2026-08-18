@@ -90,19 +90,28 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def _flat_download(symbol: str, period: str) -> pd.DataFrame:
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        frame = yf.download(symbol, period=period, auto_adjust=True, progress=False,
-                            actions=False, threads=False)
+def _clean_ohlcv_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
     if isinstance(frame.columns, pd.MultiIndex):
         frame.columns = frame.columns.get_level_values(0)
     needed = ["Open", "High", "Low", "Close", "Volume"]
     if frame.empty or not set(needed).issubset(frame.columns):
         raise RuntimeError(f"{symbol}: no usable OHLCV data")
     frame = frame[needed].copy().sort_index()
+    frame[needed] = frame[needed].apply(pd.to_numeric, errors="coerce")
+    frame = frame.replace([np.inf, -np.inf], np.nan).dropna(subset=needed)
+    frame = frame[(frame[["Open", "High", "Low", "Close"]] > 0).all(axis=1)]
+    if frame.empty:
+        raise RuntimeError(f"{symbol}: no complete finite OHLCV rows")
     frame.index = pd.to_datetime(frame.index).tz_localize(None)
     return frame[~frame.index.duplicated(keep="last")]
+
+
+def _flat_download(symbol: str, period: str) -> pd.DataFrame:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frame = yf.download(symbol, period=period, auto_adjust=True, progress=False,
+                            actions=False, threads=False)
+    return _clean_ohlcv_frame(frame, symbol)
 
 
 def download_data(ticker: str, context: Iterable[str], period: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], list[str]]:
@@ -171,9 +180,9 @@ def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
     tr = pd.concat([(d.High - d.Low), (d.High - prev_close).abs(),
                     (d.Low - prev_close).abs()], axis=1).max(axis=1)
     d["ATR"] = tr.rolling(14).mean()
-    d["ret_1"] = d.Close.pct_change()
+    d["ret_1"] = d.Close.pct_change(fill_method=None)
     for n in (5, 10, 20, 60):
-        d[f"ret_{n}"] = d.Close.pct_change(n)
+        d[f"ret_{n}"] = d.Close.pct_change(n, fill_method=None)
     d["sma20_gap"] = d.Close / d.Close.rolling(20).mean() - 1
     d["sma60_gap"] = d.Close / d.Close.rolling(60).mean() - 1
     d["trend_20_60"] = d.Close.rolling(20).mean() / d.Close.rolling(60).mean() - 1
@@ -202,7 +211,7 @@ def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
         safe = "".join(ch if ch.isalnum() else "_" for ch in symbol).strip("_") or f"ctx{i}"
         for n in (1, 5, 20):
             name = f"ctx_{safe}_ret{n}"
-            d[name] = aligned.pct_change(n)
+            d[name] = aligned.pct_change(n, fill_method=None)
             features.append(name)
         name = f"ctx_{safe}_trend"
         d[name] = aligned / aligned.rolling(60).mean() - 1
@@ -708,14 +717,17 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260818.1"
-STRATEGY_VERSION = "20260818.1"
+MODEL_VERSION = "20260819.1"
+STRATEGY_VERSION = "20260819.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def record_prediction(database: str, result: dict, latest: pd.Series,
                       market: pd.DataFrame, args: argparse.Namespace) -> int:
     """Settle expired outcomes, then append one immutable prediction snapshot."""
+    market_price = result.get("latest_price")
+    if not isinstance(market_price, (int, float)) or not np.isfinite(market_price) or market_price <= 0:
+        raise ValueError("market_price must be a finite positive number; prediction was not recorded")
     con = sqlite3.connect(database)
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA foreign_keys = ON")
@@ -792,7 +804,7 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
         strategy_version,indicators_json,reason,market_regime)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (dt.datetime.now(TAIPEI).isoformat(), result["ticker"], result["latest_date"],
-         result["latest_price"], action, entry,
+         market_price, action, entry,
          plan["entry_low"] if signal else None, plan["entry_high"] if signal else None,
          stop, target1, target2, result["latest_probability"],
          result["oos_trading"]["win_rate"],
@@ -874,6 +886,10 @@ def main() -> int:
         usable, latest, features, args.horizon, args.model)[0][0])
     latest_atr = float(latest.ATR.iloc[0])
     latest_close = float(latest.Close.iloc[0])
+    if not all(np.isfinite(value) for value in (latest_probability, latest_atr, latest_close)):
+        raise RuntimeError("latest market data or model output is not finite; no prediction was recorded")
+    if latest_close <= 0 or latest_atr <= 0:
+        raise RuntimeError("latest Close and ATR must be positive; no prediction was recorded")
     latest_volume_mean20 = float(data.Volume.rolling(20).mean().iloc[-1])
     latest_volume_ratio20 = (float(latest.Volume.iloc[0]) / latest_volume_mean20
                              if latest_volume_mean20 > 0 else None)

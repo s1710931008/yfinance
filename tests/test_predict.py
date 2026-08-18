@@ -23,6 +23,22 @@ def market_frame():
     }, index=idx)
 
 
+def test_clean_ohlcv_removes_incomplete_trailing_row():
+    frame = market_frame()
+    frame.loc[frame.index[-1], "Close"] = np.nan
+    cleaned = predict._clean_ohlcv_frame(frame, "00631L.TW")
+    assert len(cleaned) == len(frame) - 1
+    assert cleaned.index[-1] == frame.index[-2]
+    assert np.isfinite(cleaned[["Open", "High", "Low", "Close", "Volume"]]).all().all()
+
+
+def test_clean_ohlcv_rejects_no_complete_rows():
+    frame = market_frame()
+    frame["Close"] = np.nan
+    with np.testing.assert_raises_regex(RuntimeError, "no complete finite OHLCV rows"):
+        predict._clean_ohlcv_frame(frame, "00631L.TW")
+
+
 def test_simulation_applies_costs_and_target():
     market = market_frame()
     rows = market.iloc[[0]].copy()
@@ -162,3 +178,12 @@ def test_build_dataset_has_context_and_no_tail_labels():
     assert any(name.startswith("ctx_TWII") for name in features)
     assert {"rsi14", "kd_k", "kd_d", "macd_hist", "cmf20", "obv_momentum20"} <= set(features)
     assert data.label.tail(5).isna().all()
+
+
+def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path):
+    result = {"latest_price": float("nan")}
+    with np.testing.assert_raises_regex(ValueError, "market_price must be"):
+        predict.record_prediction(
+            str(tmp_path / "predictions.sqlite3"), result, pd.Series(),
+            pd.DataFrame(), SimpleNamespace())
+    assert not (tmp_path / "predictions.sqlite3").exists()
