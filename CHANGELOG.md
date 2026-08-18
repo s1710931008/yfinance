@@ -11,11 +11,14 @@
 - 新增 GitHub Actions 工作流程，支援每個交易日台北時間 16:30 排程及手動執行。
 - 新增依賴清單、測試步驟、分析結果 artifact 與 SQLite cache 延續機制。
 - 新增 `.gitignore`，避免將本機虛擬環境與執行暫存檔提交至版本庫。
+- 新增 GitHub Pages 發布工作，將最新分析結果提供為固定的 `latest.json` GET 網址。
+- 新增公開結果入口頁與強制免責聲明；SQLite 仍只保存在非公開的 workflow artifact/cache。
 
 ### Changed
 
 - 自 Git 追蹤中移除 `.venv`；僅影響 repository 大小，不刪除本機虛擬環境。
 - README 補充 GitHub Actions 操作方式、保存期限及非永久備份限制。
+- README 補充 GET 網址、GitHub Pages 首次啟用方式與公開資料限制。
 
 ### Fixed
 
@@ -26,12 +29,14 @@
 - 模型演算法、技術指標、交易規則、參數、資料處理及 SQLite schema 均未變更。
 - 預期不影響訊號、勝率、交易頻率、報酬、最大回撤、Profit Factor 或風險報酬比。
 - 未新增參數搜尋或模型選擇，因此不增加模型過度擬合風險。
+- 發布內容只包含既有 `validation.json`；不公開 SQLite，亦不提供新的推測資料。
 
 ### Validation
 
 - 本機測試：8 項全部通過。
 - GitHub Actions workflow YAML 靜態解析通過。
 - 尚未取得首次 GitHub-hosted runner 執行結果；上線後由手動或排程執行確認。
+- GitHub Pages GET 發布待推送後進行首次部署驗證。
 - 正式排程執行仍須通過既有 Walk-Forward 與獨立 OOS 驗證門檻；失敗時不得提供買賣建議。
 
 ### Version

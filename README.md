@@ -36,6 +36,22 @@ SQLite 也會透過 GitHub Actions cache 帶到下一次成功執行；cache 與
 正式使用仍應另行安排每日備份與還原測試。排程採 UTC cron，未排除台灣休市日；休市日
 若 Yahoo Finance 沒有新行情，輸出仍須依程式既有的資料完整性與模型驗證規則判斷。
 
+成功執行後，最新 JSON 也會發布到固定 GET 網址：
+
+```text
+https://s1710931008.github.io/yfinance/latest.json
+```
+
+例如：
+
+```bash
+curl --fail https://s1710931008.github.io/yfinance/latest.json
+```
+
+首次部署前，repository 必須在 **Settings → Pages → Build and deployment → Source**
+選擇 **GitHub Actions**。此網址公開最新 JSON，但不公開 SQLite；GitHub Pages 是靜態發布，
+不提供身分驗證或即時計算，內容只會在 workflow 成功後更新。
+
 確認依賴已安裝：
 
 ```bash
