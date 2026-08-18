@@ -25,6 +25,7 @@
 ### Fixed
 
 - 修正進場缺口上限測試的參數傳遞，使測試明確設定區間上下限；正式策略參數與程式邏輯不變。
+- 修正同一 workflow run 重跑 job 時產生多個同名 Pages artifact，導致 `deploy-pages` 無法選擇部署檔案；artifact 名稱現在包含 `github.run_attempt`，deploy 只取當次 attempt。
 
 ### Impact
 
@@ -42,6 +43,7 @@
 - GitHub Pages GET 發布待推送後進行首次部署驗證。
 - 針對首次 GET 取得 404，補上 push 觸發並保留手動與平日排程觸發方式。
 - Node.js 24 Actions 升級後，本機 8 項測試與 workflow YAML 靜態檢查均通過；GitHub-hosted runner 驗證待推送後確認。
+- Run #8 證實 Node.js 24 Actions 可完成預測與 artifact 上傳；Pages 因同名 artifact 重複而失敗，已加入 run-attempt 去重修正，待新 run 驗證。
 - 正式排程執行仍須通過既有 Walk-Forward 與獨立 OOS 驗證門檻；失敗時不得提供買賣建議。
 
 ### Version
