@@ -26,6 +26,15 @@ python -m pip install yfinance pandas numpy scikit-learn
 
 ## GitHub Actions 自動執行
 
+若要在每次排程完成後收到 Discord 通知，請到 repository 的
+`Settings → Secrets and variables → Actions → New repository secret`，建立：
+
+- Name：`DISCORD_WEBHOOK_URL`
+- Secret：Discord Webhook 的完整網址
+
+Webhook 不可直接寫入 workflow 或其他公開檔案。通知會顯示分析與部署狀態、行情日期、
+目前價位、正式結論、驗證狀態，以及儀表板與 Actions 執行連結。
+
 `.github/workflows/predict.yml` 會在每週一至週五台北時間 16:30 自動執行，
 也可在 GitHub repository 的 **Actions → 00631L prediction → Run workflow** 手動啟動。
 流程會先安裝 `requirements.txt`、執行測試，再以本文件的預設參數完成 00631L

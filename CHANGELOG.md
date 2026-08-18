@@ -8,6 +8,7 @@
 
 ### Added
 
+- 新增每日 workflow 完成後的 Discord 通知，包含分析／部署狀態、行情日期、目前價位、正式結論、驗證狀態、儀表板及 Actions 執行連結；Webhook 僅由 GitHub Actions Secret 讀取。
 - 新增 GitHub Actions 工作流程，支援每個交易日台北時間 16:30 排程及手動執行。
 - 新增依賴清單、測試步驟、分析結果 artifact 與 SQLite cache 延續機制。
 - 新增 `.gitignore`，避免將本機虛擬環境與執行暫存檔提交至版本庫。
@@ -35,6 +36,7 @@
 
 ### Impact
 
+- Discord 通知只讀取既有分析 artifact，不修改模型、策略、參數、驗證門檻、SQLite 或預測結果；不影響訊號、勝率、交易頻率、報酬、最大回撤、Profit Factor、風險報酬比及過度擬合風險。
 - 模型演算法、技術指標、交易規則、參數、資料處理及 SQLite schema 均未變更。
 - 預期不影響訊號、勝率、交易頻率、報酬、最大回撤、Profit Factor 或風險報酬比。
 - 未新增參數搜尋或模型選擇，因此不增加模型過度擬合風險。
@@ -45,6 +47,7 @@
 
 ### Validation
 
+- Discord 通知 workflow YAML、shell 結構及本機 11 項測試通過；GitHub-hosted runner 實際通知待推送及設定 repository secret 後確認。
 - 本機測試：8 項全部通過。
 - GitHub Actions workflow YAML 靜態解析通過。
 - 尚未取得首次 GitHub-hosted runner 執行結果；上線後由手動或排程執行確認。
@@ -67,6 +70,7 @@
 - 使用者確認：2026-08-18，使用者回覆「確認升級 Node 24 Actions」。
 - 使用者確認：2026-08-18，使用者確認建立 latest.json 中文儀表板與 Actions 執行進度。
 - 使用者確認：2026-08-18，使用者回覆「確認補齊價位與買賣點驗證」。
+- 使用者確認：2026-08-19，使用者要求排程完成後通知 Discord 並附儀表板連結。
 
 ## [20260818.1] - 2026-08-18
 

@@ -111,3 +111,53 @@ jobs:
         uses: actions/deploy-pages@v5
         with:
           artifact_name: github-pages-${{ github.run_attempt }}
+
+  notify:
+    if: always()
+    needs:
+      - predict
+      - deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download analysis result
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: 00631L-analysis-${{ github.run_number }}-${{ github.run_attempt }}
+          path: notification-result
+
+      - name: Send Discord result notification
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          PREDICT_RESULT: ${{ needs.predict.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PAGE_URL: https://s1710931008.github.io/yfinance/
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "::warning::DISCORD_WEBHOOK_URL secret is not configured; notification skipped"
+            exit 0
+          fi
+
+          result_file="notification-result/validation.json"
+          if [ -f "$result_file" ]; then
+            market_date=$(jq -r '.latest_date // "資料不足"' "$result_file")
+            market_price=$(jq -r 'if (.latest_price | type) == "number" then (.latest_price | tostring) else "資料不足" end' "$result_file")
+            action=$(jq -r '.action // "資料不足"' "$result_file")
+            validation=$(jq -r 'if .validation_snapshot.passed == true then "通過" elif .validation_snapshot.passed == false then "未通過" else "資料不足" end' "$result_file")
+          else
+            market_date="資料不足"
+            market_price="資料不足"
+            action="分析結果檔案不存在"
+            validation="資料不足"
+          fi
+
+          content=$(printf '00631L 每日分析完成\n分析：%s｜部署：%s\n行情日期：%s｜目前價位：%s\n結論：%s｜正式驗證：%s\n查看儀表板：%s\n執行紀錄：%s\n本分析僅供研究與參考，不構成投資建議；00631L 為槓桿型 ETF，使用者應自行承擔交易風險與損益。' \
+            "$PREDICT_RESULT" "$DEPLOY_RESULT" "$market_date" "$market_price" \
+            "$action" "$validation" "$PAGE_URL" "$RUN_URL")
+          payload=$(jq -n --arg content "$content" '{content: $content}')
+          curl --fail-with-body --retry 3 --retry-delay 5 \
+            -H 'Content-Type: application/json' \
+            -d "$payload" \
+            "$DISCORD_WEBHOOK_URL"
