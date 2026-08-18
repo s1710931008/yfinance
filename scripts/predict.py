@@ -16,6 +16,7 @@ import sys
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Iterable
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -40,6 +41,7 @@ class Trade:
     net_r: float
     reason: str
     regime: str
+    net_return: float = 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -321,7 +323,8 @@ def simulate(rows: pd.DataFrame, market: pd.DataFrame, threshold: float, horizon
         net_r = (exit_px - entry - costs) / risk
         trades.append(Trade(str(signal_date.date()), str(market.index[entry_i].date()),
                             str(market.index[exit_i].date()), entry, exit_px,
-                            float(row.probability), gross_r, net_r, reason, str(row.regime)))
+                            float(row.probability), gross_r, net_r, reason, str(row.regime),
+                            (exit_px - entry - costs) / entry))
         blocked_until = exit_i + 1
     return trades
 
@@ -380,7 +383,8 @@ def simulate_averaging(rows: pd.DataFrame, market: pd.DataFrame, threshold: floa
             str(signal_date.date()), str(market.index[entry_i].date()),
             str(market.index[exit_i].date()), weighted_entry, exit_px,
             float(row.probability), gross_r, net_r,
-            ("add+" if added else "") + reason, str(row.regime)))
+            ("add+" if added else "") + reason, str(row.regime),
+            (gross_pnl - costs) / (entry + add_value)))
         blocked_until = exit_i + 1
     return trades, add_count
 
@@ -389,19 +393,76 @@ def trade_metrics(trades: list[Trade]) -> dict[str, float | int | None]:
     if not trades:
         return {"trades": 0, "win_rate": None, "ev_r": None, "profit_factor": None,
                 "max_drawdown_r": None, "total_r": 0.0, "wins": 0, "losses": 0,
-                "average_win_r": None, "average_loss_r": None, "payoff_ratio": None}
+                "average_win_r": None, "average_loss_r": None, "payoff_ratio": None,
+                "max_drawdown_pct": None, "total_return_pct": None}
     r = np.array([t.net_r for t in trades], dtype=float)
     gains, losses = r[r > 0].sum(), -r[r < 0].sum()
     equity = np.r_[0.0, np.cumsum(r)]
     dd = np.maximum.accumulate(equity) - equity
     avg_win = float(r[r > 0].mean()) if (r > 0).any() else None
     avg_loss = float(r[r <= 0].mean()) if (r <= 0).any() else None
+    returns = np.array([t.net_return for t in trades], dtype=float)
+    compounded = np.r_[1.0, np.cumprod(1 + returns)]
+    peak = np.maximum.accumulate(compounded)
+    drawdown_pct = np.divide(peak - compounded, peak, out=np.zeros_like(peak), where=peak > 0)
     return {"trades": len(trades), "win_rate": float((r > 0).mean()), "ev_r": float(r.mean()),
             "profit_factor": float(gains / losses) if losses > 0 else (float("inf") if gains > 0 else None),
             "max_drawdown_r": float(dd.max()), "total_r": float(r.sum()),
             "wins": int((r > 0).sum()), "losses": int((r <= 0).sum()),
             "average_win_r": avg_win, "average_loss_r": avg_loss,
-            "payoff_ratio": (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss else None}
+            "payoff_ratio": (avg_win / abs(avg_loss)) if avg_win is not None and avg_loss else None,
+            "max_drawdown_pct": float(drawdown_pct.max()),
+            "total_return_pct": float(compounded[-1] - 1)}
+
+
+def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
+                      oos_metrics: dict, final_metrics: dict,
+                      args: argparse.Namespace) -> dict[str, object]:
+    """Apply the mandatory validation gates without using future data for selection."""
+    fold_metrics: list[dict[str, object]] = []
+    for fold, rows in oos_rows.groupby("fold", sort=True):
+        metrics = trade_metrics(simulate(
+            rows, market, args.threshold, args.horizon, args.stop_atr,
+            args.reward_risk, args.commission_bps, args.tax_bps,
+            args.slippage_bps, args.entry_gap_low_atr, args.entry_gap_high_atr))
+        fold_metrics.append({"fold": int(fold), **metrics})
+    fold_win_rates = [m["win_rate"] for m in fold_metrics if m["win_rate"] is not None]
+    all_folds_have_trades = (len(fold_metrics) >= 2
+                             and len(fold_win_rates) == len(fold_metrics))
+    fold_std_pp = (float(np.std(fold_win_rates, ddof=0) * 100)
+                   if all_folds_have_trades else None)
+    win_rate_gap_pp = (abs(float(final_metrics["win_rate"] - oos_metrics["win_rate"])) * 100
+                       if final_metrics["win_rate"] is not None
+                       and oos_metrics["win_rate"] is not None else None)
+    checks = {
+        "effective_trades_at_least_30": oos_metrics["trades"] >= 30,
+        "walk_forward_winrate_std_at_most_15pp":
+            all_folds_have_trades and fold_std_pp is not None and fold_std_pp <= 15,
+        "profit_factor_at_least_1_2":
+            oos_metrics["profit_factor"] is not None and oos_metrics["profit_factor"] >= 1.2,
+        "max_drawdown_at_most_25pct":
+            oos_metrics["max_drawdown_pct"] is not None
+            and oos_metrics["max_drawdown_pct"] <= 0.25,
+        "oos_vs_development_winrate_gap_at_most_10pp":
+            win_rate_gap_pp is not None and win_rate_gap_pp <= 10,
+        "walk_forward_and_independent_oos_completed":
+            bool(fold_metrics) and final_metrics["trades"] > 0,
+    }
+    return {
+        "passed": all(checks.values()),
+        "checks": checks,
+        "effective_trades": oos_metrics["trades"],
+        "fold_winrate_std_pp": fold_std_pp,
+        "all_folds_have_trades": all_folds_have_trades,
+        "profit_factor": oos_metrics["profit_factor"],
+        "max_drawdown_pct": oos_metrics["max_drawdown_pct"],
+        "development_walk_forward_winrate": oos_metrics["win_rate"],
+        "independent_oos_winrate": final_metrics["win_rate"],
+        "oos_vs_development_winrate_gap_pp": win_rate_gap_pp,
+        "folds": fold_metrics,
+        "drawdown_basis": "每筆交易將配置給 00631L 的資金全額投入，扣成本後逐筆複利",
+        "comparison_basis": "開發期 Walk-Forward OOS 與完全隔離 Final Test 比較",
+    }
 
 
 def strict_entry_validation(data: pd.DataFrame, features: list[str], market: pd.DataFrame,
@@ -647,14 +708,18 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "extra-trees-full-technical-v2"
-STRATEGY_VERSION = "strict-entry-walk-forward-v2"
+MODEL_VERSION = "20260818.1"
+STRATEGY_VERSION = "20260818.1"
+TAIPEI = ZoneInfo("Asia/Taipei")
 
 
 def record_prediction(database: str, result: dict, latest: pd.Series,
                       market: pd.DataFrame, args: argparse.Namespace) -> int:
     """Settle expired outcomes, then append one immutable prediction snapshot."""
     con = sqlite3.connect(database)
+    con.execute("PRAGMA journal_mode = WAL")
+    con.execute("PRAGMA foreign_keys = ON")
+    con.execute("PRAGMA busy_timeout = 5000")
     con.execute("""
         CREATE TABLE IF NOT EXISTS predictions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -697,38 +762,43 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
                     stop_touched=?, target1_touched=?, target2_touched=?, actual_return=?,
                     trade_result=?, prediction_success=?, settled_at=? WHERE id=?""",
                     (high, low, close, int(stop_hit), int(target1_hit), int(target2_hit),
-                     actual_return, outcome, success, dt.datetime.now().astimezone().isoformat(), row_id))
+                     actual_return, outcome, success, dt.datetime.now(TAIPEI).isoformat(), row_id))
 
-    plan = result["entry_plan"]
+    plan = result["execution_plan"]
     signal = bool(result["signal"])
-    entry = (plan["acceptable_low"] + plan["acceptable_high"]) / 2 if signal else None
-    atr = float(latest["ATR"])
-    risk = args.stop_atr * atr
-    stop = entry - risk if entry is not None else None
-    target1 = entry + risk if entry is not None else None
-    target2 = entry + args.reward_risk * risk if entry is not None else None
-    valid_until = (latest_date + pd.offsets.BDay(args.horizon)).date()
+    entry = plan["suggested_entry"] if signal else None
+    stop = plan["stop"] if signal else None
+    target1 = plan["take_profit_1"] if signal else None
+    target2 = plan["take_profit_2"] if signal else None
+    valid_until = result["valid_until"]
     indicators = {name: clean_json(float(latest[name])) for name in (
         "rsi14", "kd_k", "kd_d", "macd", "macd_signal", "macd_hist",
         "volume_z20", "volume_ratio_5_20", "trend_20_60", "ATR",
         "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap"
     ) if name in latest and pd.notna(latest[name])}
-    action = "買進" if signal else "不交易"
-    reason = ("所有訊號與嚴格驗證通過" if signal else
-              "機率、交易閘門或多重買進價驗證未全部通過")
+    snapshot = {
+        "indicators": indicators,
+        "validation_snapshot": result["validation_snapshot"],
+        "data_source_snapshot": result["data_source_snapshot"],
+        "execution_plan": result["execution_plan"],
+    }
+    action = result["action"]
+    reason = ("正式驗證、訊號、交易閘門與嚴格進場驗證全部通過" if signal else
+              "正式驗證、機率、交易閘門或嚴格進場驗證未全部通過")
     cur = con.execute("""INSERT INTO predictions (
         predicted_at,ticker,market_date,market_price,action,suggested_entry,
         entry_low,entry_high,stop_price,take_profit_1,take_profit_2,
         model_probability,backtest_win_rate,valid_until,model_version,
         strategy_version,indicators_json,reason,market_regime)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (dt.datetime.now().astimezone().isoformat(), result["ticker"], result["latest_date"],
+        (dt.datetime.now(TAIPEI).isoformat(), result["ticker"], result["latest_date"],
          result["latest_price"], action, entry,
-         plan["acceptable_low"] if signal else None, plan["acceptable_high"] if signal else None,
+         plan["entry_low"] if signal else None, plan["entry_high"] if signal else None,
          stop, target1, target2, result["latest_probability"],
-         result["strict_entry_validation"]["summary"]["median_win_rate"],
+         result["oos_trading"]["win_rate"],
          str(valid_until), result["model_version"], result["strategy_version"],
-         json.dumps(indicators, ensure_ascii=False), reason, str(latest.get("regime", "unknown"))))
+         json.dumps(clean_json(snapshot), ensure_ascii=False), reason,
+         str(latest.get("regime", "unknown"))))
     prediction_id = int(cur.lastrowid)
     con.commit()
     con.close()
@@ -792,6 +862,7 @@ def main() -> int:
                             args.slippage_bps, args.entry_gap_low_atr,
                             args.entry_gap_high_atr)
     final_prob, final_tm = probability_metrics(final, args.threshold), trade_metrics(final_trades)
+    required_validation = formal_validation(oos, primary, oos_tm, final_tm, args)
 
     # A quoted entry range must survive several alternative chronological cuts.
     # This deliberately costs more runtime than a single attractive backtest.
@@ -839,43 +910,51 @@ def main() -> int:
             "oos": {**trade_metrics(avg_oos_trades), "adds": avg_oos_adds},
             "final_test": {**trade_metrics(avg_final_trades), "adds": avg_final_adds},
         }
+    formal_passed = bool(required_validation["passed"])
     strict_passed = bool(strict_entry["passed"])
+    latest_signal = bool(latest_probability >= args.threshold)
+    executable = bool(latest_signal and formal_passed and gate["passed"] and strict_passed)
     candidate_low = latest_close + args.entry_gap_low_atr * latest_atr
     candidate_high = latest_close + args.entry_gap_high_atr * latest_atr
     candidate_entry = (candidate_low + candidate_high) / 2
     candidate_risk = args.stop_atr * latest_atr
+    valid_until = str((pd.Timestamp(latest.index[0]) + pd.offsets.BDay(args.horizon)).date())
     execution_plan = {
-        "available": strict_passed,
-        "suggested_entry": candidate_entry if strict_passed else None,
-        "entry_low": candidate_low if strict_passed else None,
-        "entry_high": candidate_high if strict_passed else None,
+        "available": executable,
+        "suggested_entry": candidate_entry if executable else None,
+        "entry_low": candidate_low if executable else None,
+        "entry_high": candidate_high if executable else None,
         "tranches": ([{"price": candidate_high, "capital_ratio": 0.50},
                        {"price": candidate_low, "capital_ratio": 0.50}]
-                      if strict_passed else []),
-        "stop": candidate_entry - candidate_risk if strict_passed else None,
-        "take_profit_1": candidate_entry + candidate_risk if strict_passed else None,
-        "take_profit_2": candidate_entry + args.reward_risk * candidate_risk if strict_passed else None,
+                      if executable else []),
+        "position_sizing_denominator": "配置給 00631L 的資金",
+        "stop": candidate_entry - candidate_risk if executable else None,
+        "take_profit_1": candidate_entry + candidate_risk if executable else None,
+        "take_profit_2": candidate_entry + args.reward_risk * candidate_risk if executable else None,
         "reward_risk_1": 1.0, "reward_risk_2": args.reward_risk,
-        "condition": "機率、交易閘門、多重驗證及開盤區間全部通過",
-        "invalidation": "任一驗證失敗、開盤超出區間或跌破停損",
+        "condition": "正式驗證、機率、交易閘門、多重驗證及下一交易日開盤區間全部通過",
+        "invalidation": "任一驗證失敗、開盤超出區間、大盤轉空或跌破停損",
+        "valid_until": valid_until,
     }
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
         "model_version": (MODEL_VERSION if args.model == "extra-trees" else
-                          "logistic-full-technical-v2"),
+                          "20260818.1"),
         "strategy_version": STRATEGY_VERSION,
         "latest_date": str(latest.index[0].date()),
         "latest_price": latest_close, "latest_probability": latest_probability,
         "threshold": args.threshold,
         "threshold_margin": latest_probability - args.threshold,
-        "raw_signal": bool(latest_probability >= args.threshold),
-        "signal": bool(latest_probability >= args.threshold and gate["passed"]
-                       and strict_entry["passed"]),
-        "risk_levels": {"stop_1_5_atr": latest_close - args.stop_atr * latest_atr,
-                        "target_2r": latest_close + args.reward_risk * args.stop_atr * latest_atr},
+        "raw_signal": latest_signal,
+        "signal": executable,
+        "action": "買進" if executable else "不交易",
+        "valid_until": valid_until,
+        "generated_at": dt.datetime.now(TAIPEI).isoformat(),
+        "risk_levels": {"stop_1_5_atr": execution_plan["stop"],
+                        "target_2r": execution_plan["take_profit_2"]},
         "entry_plan": {"latest_close_reference": latest_close,
-                       "acceptable_low": latest_close + args.entry_gap_low_atr * latest_atr,
-                       "acceptable_high": latest_close + args.entry_gap_high_atr * latest_atr,
+                       "acceptable_low": candidate_low if executable else None,
+                       "acceptable_high": candidate_high if executable else None,
                        "gap_low_atr": args.entry_gap_low_atr,
                        "gap_high_atr": args.entry_gap_high_atr,
                        "selection_rule": "OOS至少30筆、EV_R>0、PF>=1.2後，以勝率及保留期穩健性選擇",
@@ -895,13 +974,24 @@ def main() -> int:
         "recent_year": recent_year, "recent_year_trading": recent_year_metrics,
         "annual_stability": annual, "regime_stability": regimes,
         "strategy_health": health, "trading_gate": gate,
+        "validation_snapshot": required_validation,
         "strict_entry_validation": strict_entry,
         "validated_score": validated_score(oos_prob, oos_tm, annual, regimes),
         "final_test_probability": final_prob, "final_test_trading": final_tm,
         "costs_bps": {"commission_each_side": args.commission_bps,
                       "tax_sell_side": args.tax_bps, "slippage_each_side": args.slippage_bps},
         "holding": holding,
-        "confidence": ("高" if strict_passed else "低"),
+        "confidence": ("高" if executable else "低"),
+        "data_source_snapshot": {
+            "source": "Yahoo Finance via yfinance",
+            "price_type": "auto-adjusted daily OHLCV",
+            "market_date": str(latest.index[0].date()),
+            "timezone": "Asia/Taipei",
+            "downloaded_at": dt.datetime.now(TAIPEI).isoformat(),
+            "period": args.period,
+            "missing_value_handling": "技術指標暖機列排除；參考市場最多向前填補 3 日",
+            "corporate_actions": "yfinance auto_adjust=True",
+        },
         "main_risks": ["槓桿ETF波動與複利耗損", "模型跨期不穩定",
                        "跳空造成停損滑價", "歷史勝率不保證未來結果"],
         "oos_trades": [asdict(t) for t in oos_trades],
@@ -928,6 +1018,21 @@ def main() -> int:
     print(f"模型版本：{model_zh}；{features_zh}")
     print(f"版本代碼：模型 {result['model_version']}；策略 {result['strategy_version']}")
     print(f"交易驗證閘門：{'通過' if gate['passed'] else '未通過'}")
+    validation_zh = {
+        "effective_trades_at_least_30": "有效交易樣本數 ≥ 30",
+        "walk_forward_winrate_std_at_most_15pp": "Walk-Forward fold 勝率標準差 ≤ 15 個百分點",
+        "profit_factor_at_least_1_2": "Profit Factor ≥ 1.2",
+        "max_drawdown_at_most_25pct": "最大回撤 ≤ 25%",
+        "oos_vs_development_winrate_gap_at_most_10pp": "OOS 與開發期勝率差異 ≤ 10 個百分點",
+        "walk_forward_and_independent_oos_completed": "Walk-Forward 與獨立 OOS 已完成",
+    }
+    print(f"正式模型驗證：{'通過' if required_validation['passed'] else '未通過'}")
+    for name, passed in required_validation["checks"].items():
+        print(f"  {validation_zh.get(name, name)}：{'通過' if passed else '未通過／資料不足'}")
+    print(f"  有效交易 {required_validation['effective_trades']} 筆；PF "
+          f"{fmt(required_validation['profit_factor'])}；最大回撤 "
+          f"{pct(required_validation['max_drawdown_pct'])}；勝率差 "
+          f"{fmt(required_validation['oos_vs_development_winrate_gap_pp'], 1)} 個百分點")
     strict_summary = strict_entry["summary"]
     print(f"多重買進價驗證：{'通過' if strict_entry['passed'] else '未通過'}（{strict_summary['runs']} 組）")
     print(f"  中位交易 {strict_summary['median_trades']:.0f} 筆；"

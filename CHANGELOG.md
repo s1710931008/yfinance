@@ -14,6 +14,8 @@
 - 新增 GitHub Pages 發布工作，將最新分析結果提供為固定的 `latest.json` GET 網址。
 - 新增公開結果入口頁與強制免責聲明；SQLite 仍只保存在非公開的 workflow artifact/cache。
 - 新增中文預測儀表板，直接呈現今日資料、Actions 執行進度、模型機率、OOS／Final Test、驗證門檻、市場分層、風險與 prediction ID。
+- 新增扣成本逐筆複利的最大回撤百分比、Walk-Forward 各 fold 勝率穩定性、開發期 Walk-Forward OOS 與獨立 Final Test 勝率差異及正式 `validation_snapshot`。
+- 儀表板新增目前價位、條件買進價與區間、分批比例、停損、兩段停利、風險報酬比、成立／失效條件及有效期限欄位。
 
 ### Changed
 
@@ -22,6 +24,8 @@
 - README 補充 GET 網址、GitHub Pages 首次啟用方式與公開資料限制。
 - Pages workflow 或公開入口檔案推送至 `main` 時會自動執行，避免部署設定更新後仍需額外手動觸發。
 - 首頁由單一 JSON 連結改為動態讀取 `latest.json` 與公開 GitHub Actions API；進度與最近一次成功發布結果分開呈現。
+- 模型與策略版本更新為 `20260818.1`；正式執行價位必須同時通過完整模型驗證、既有交易閘門、嚴格進場驗證與最新訊號。
+- SQLite snapshot 同一 transaction 保存指標、正式驗證、資料來源及執行計畫，並明確使用 Asia/Taipei 時間；啟用 WAL、foreign key 與 busy timeout。
 - 將 checkout、setup-python、cache、artifact 與 GitHub Pages 官方 Actions 升級至 Node.js 24 版本，移除 Node.js 20 淘汰與舊 `punycode` 相依警告。
 
 ### Fixed
@@ -37,6 +41,7 @@
 - 發布內容只包含既有 `validation.json`；不公開 SQLite，亦不提供新的推測資料。
 - Actions 執行環境相依升級不修改模型或策略行為；可能只影響 CI 啟動、cache 與 artifact 處理方式。
 - 儀表板只轉譯既有結果；必要驗證資料缺少時標示「資料不足」並禁止顯示可執行價格。
+- 新驗證閘門可能降低交易訊號與頻率；不更動模型超參數或進出場參數，不預設勝率、報酬、PF 或回撤會改善，也未增加參數搜尋造成的過度擬合風險。
 
 ### Validation
 
@@ -48,16 +53,20 @@
 - Node.js 24 Actions 升級後，本機 8 項測試與 workflow YAML 靜態檢查均通過；GitHub-hosted runner 驗證待推送後確認。
 - Run #8 證實 Node.js 24 Actions 可完成預測與 artifact 上傳；Pages 因同名 artifact 重複而失敗，已加入 run-attempt 去重修正，待新 run 驗證。
 - 中文儀表板已通過 HTML 解析、JavaScript 語法、workflow YAML 與本機 8 項測試；GitHub Pages 實際部署與視覺驗證待推送後確認。
+- 2026-08-18 完整 10 年 Walk-Forward 與獨立 Final Test：正式驗證未通過；68 筆 OOS 交易、勝率 58.8%、PF 1.549、最大回撤 19.8%，Final Test 51 筆、勝率 62.7%，勝率差 3.9 個百分點。5 folds 中 2 folds 無有效交易，因此 fold 穩定性資料不足／未通過。
+- 9 組嚴格進場驗證未通過：中位 60 筆、勝率 45.8%、EV -0.102R、PF 0.778、最大回撤 13.132R；雙倍成本 EV -0.230R、PF 0.565。結論為「不交易」，不得提供買進、停損或停利價。
+- 本機 11 項測試、HTML／JavaScript、workflow YAML 與 SQLite transaction／integrity_check 全部通過；GitHub-hosted runner 與 Pages 部署待推送後確認。
 - 正式排程執行仍須通過既有 Walk-Forward 與獨立 OOS 驗證門檻；失敗時不得提供買賣建議。
 
 ### Version
 
 - 文件／網站版本：`20260818.3`
-- 模型版本：不變。
-- 策略版本：不變。
+- 模型版本：`20260818.1`。
+- 策略版本：`20260818.1`。
 - 使用者確認：2026-08-18，使用者回覆「掛上」。
 - 使用者確認：2026-08-18，使用者回覆「確認升級 Node 24 Actions」。
 - 使用者確認：2026-08-18，使用者確認建立 latest.json 中文儀表板與 Actions 執行進度。
+- 使用者確認：2026-08-18，使用者回覆「確認補齊價位與買賣點驗證」。
 
 ## [20260818.1] - 2026-08-18
 

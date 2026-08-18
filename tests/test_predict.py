@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -76,6 +77,52 @@ def test_metrics_profit_factor_and_drawdown():
     assert metrics["ev_r"] == 0.5
     assert metrics["profit_factor"] == 3.0
     assert metrics["max_drawdown_r"] == 1.0
+
+
+def test_metrics_compounded_drawdown_percentage():
+    trades = [predict.Trade("", "", "", 1, 1, .8, r, r, "time", "bull", ret)
+              for r, ret in [(1.0, .10), (-1.0, -.20)]]
+    metrics = predict.trade_metrics(trades)
+    assert round(metrics["total_return_pct"], 3) == -.12
+    assert round(metrics["max_drawdown_pct"], 3) == .20
+
+
+def test_formal_validation_requires_all_mandatory_gates(monkeypatch):
+    def fake_simulate(rows, *_args, **_kwargs):
+        return [predict.Trade("", "", "", 1, 1, .8, r, r, "time", "bull", r / 100)
+                for r in ([1.0] * 6 + [-.5] * 4)]
+
+    monkeypatch.setattr(predict, "simulate", fake_simulate)
+    rows = pd.DataFrame({"fold": [1, 2, 3]})
+    args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
+                           commission_bps=14.25, tax_bps=10, slippage_bps=5,
+                           entry_gap_low_atr=.15, entry_gap_high_atr=.55)
+    oos = {"trades": 30, "win_rate": .60, "profit_factor": 1.5,
+           "max_drawdown_pct": .10}
+    final = {"trades": 10, "win_rate": .55}
+    validation = predict.formal_validation(rows, pd.DataFrame(), oos, final, args)
+    assert validation["passed"]
+    assert validation["fold_winrate_std_pp"] == 0
+
+
+def test_formal_validation_rejects_empty_walk_forward_fold(monkeypatch):
+    def fake_simulate(rows, *_args, **_kwargs):
+        if int(rows.fold.iloc[0]) == 1:
+            return []
+        return [predict.Trade("", "", "", 1, 1, .8, 1, 1, "time", "bull", .01)]
+
+    monkeypatch.setattr(predict, "simulate", fake_simulate)
+    rows = pd.DataFrame({"fold": [1, 2]})
+    args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
+                           commission_bps=14.25, tax_bps=10, slippage_bps=5,
+                           entry_gap_low_atr=.15, entry_gap_high_atr=.55)
+    oos = {"trades": 30, "win_rate": .60, "profit_factor": 1.5,
+           "max_drawdown_pct": .10}
+    final = {"trades": 10, "win_rate": .55}
+    validation = predict.formal_validation(rows, pd.DataFrame(), oos, final, args)
+    assert not validation["passed"]
+    assert validation["fold_winrate_std_pp"] is None
+    assert not validation["all_folds_have_trades"]
 
 
 def test_trading_gate_requires_all_conditions():
