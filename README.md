@@ -24,6 +24,18 @@ python -m pip install --upgrade pip
 python -m pip install yfinance pandas numpy scikit-learn
 ```
 
+## GitHub Actions 自動執行
+
+`.github/workflows/predict.yml` 會在每週一至週五台北時間 16:30 自動執行，
+也可在 GitHub repository 的 **Actions → 00631L prediction → Run workflow** 手動啟動。
+流程會先安裝 `requirements.txt`、執行測試，再以本文件的預設參數完成 00631L
+Walk-Forward 與 OOS 分析。
+
+每次執行會上傳 `validation.json`、`predictions.sqlite3` 與 `predict.log`，保存 30 天。
+SQLite 也會透過 GitHub Actions cache 帶到下一次成功執行；cache 與 artifact 並非永久備份，
+正式使用仍應另行安排每日備份與還原測試。排程採 UTC cron，未排除台灣休市日；休市日
+若 Yahoo Finance 沒有新行情，輸出仍須依程式既有的資料完整性與模型驗證規則判斷。
+
 確認依賴已安裝：
 
 ```bash

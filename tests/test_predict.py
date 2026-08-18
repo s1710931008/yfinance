@@ -40,7 +40,11 @@ def test_entry_range_rejects_gap_up():
     market.loc[market.index[1], "Open"] = 102
     rows = market.iloc[[0]].copy()
     rows["probability"], rows["ATR"], rows["regime"] = .9, 1., "bull"
-    assert not predict.simulate(rows, market, .7, 5, 1.5, 2, 0, 0, 0, .25)
+    assert not predict.simulate(
+        rows, market, .7, 5, 1.5, 2, 0, 0, 0,
+        entry_gap_low_atr=0,
+        entry_gap_high_atr=.25,
+    )
 
 
 def test_same_bar_stop_and_target_is_conservative():
