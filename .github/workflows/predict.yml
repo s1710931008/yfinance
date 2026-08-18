@@ -90,7 +90,12 @@ jobs:
           retention-days: 30
 
       - name: Prepare public GET result
-        run: cp artifacts/validation.json public/latest.json
+        run: |
+          cp artifacts/validation.json public/latest.json
+          python scripts/export_history.py \
+            --database artifacts/predictions.sqlite3 \
+            --output public/history.json \
+            --limit 30
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
