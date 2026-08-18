@@ -8,6 +8,9 @@ on:
     paths:
       - .github/workflows/predict.yml
       - public/**
+      - scripts/**
+      - tests/**
+      - requirements.txt
   schedule:
     # 16:30 Asia/Taipei, Monday-Friday (GitHub cron uses UTC).
     - cron: "30 8 * * 1-5"

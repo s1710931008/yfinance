@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- 修正 push 觸發範圍未包含 `scripts/**`、`tests/**` 與 `requirements.txt`，避免模型程式修正上傳後未立即執行 GitHub Actions 驗證。
 - 修正 Yahoo Finance 回傳尾端不完整行情列時，最新收盤價成為 `NaN` 並造成 SQLite `market_price NOT NULL` 寫入失敗；寫入前新增有限正數防護，禁止以舊值或推測值冒充當日行情。
 - 修正進場缺口上限測試的參數傳遞，使測試明確設定區間上下限；正式策略參數與程式邏輯不變。
 - 修正同一 workflow run 重跑 job 時產生多個同名 Pages artifact，導致 `deploy-pages` 無法選擇部署檔案；artifact 名稱現在包含 `github.run_attempt`，deploy 只取當次 attempt。
