@@ -19,6 +19,7 @@
 - 自 Git 追蹤中移除 `.venv`；僅影響 repository 大小，不刪除本機虛擬環境。
 - README 補充 GitHub Actions 操作方式、保存期限及非永久備份限制。
 - README 補充 GET 網址、GitHub Pages 首次啟用方式與公開資料限制。
+- Pages workflow 或公開入口檔案推送至 `main` 時會自動執行，避免部署設定更新後仍需額外手動觸發。
 
 ### Fixed
 
@@ -37,6 +38,7 @@
 - GitHub Actions workflow YAML 靜態解析通過。
 - 尚未取得首次 GitHub-hosted runner 執行結果；上線後由手動或排程執行確認。
 - GitHub Pages GET 發布待推送後進行首次部署驗證。
+- 針對首次 GET 取得 404，補上 push 觸發並保留手動與平日排程觸發方式。
 - 正式排程執行仍須通過既有 Walk-Forward 與獨立 OOS 驗證門檻；失敗時不得提供買賣建議。
 
 ### Version

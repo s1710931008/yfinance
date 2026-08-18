@@ -2,6 +2,12 @@ name: 00631L prediction
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/predict.yml
+      - public/**
   schedule:
     # 16:30 Asia/Taipei, Monday-Friday (GitHub cron uses UTC).
     - cron: "30 8 * * 1-5"
@@ -102,4 +108,3 @@ jobs:
       - name: Deploy GET result to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
