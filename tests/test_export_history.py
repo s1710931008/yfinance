@@ -17,13 +17,17 @@ def make_database(path):
             id INTEGER PRIMARY KEY, predicted_at TEXT, market_date TEXT,
             market_price REAL, action TEXT, model_probability REAL,
             valid_until TEXT, model_version TEXT, strategy_version TEXT,
+            suggested_entry REAL, entry_low REAL, entry_high REAL,
+            stop_price REAL, take_profit_1 REAL, take_profit_2 REAL,
             actual_close REAL, actual_return REAL, prediction_success INTEGER,
             settled_at TEXT)""")
-        con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+        con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
             (1, "2026-08-18T16:30:00+08:00", "2026-08-18", 34.81, "不交易", .33,
-             "2026-08-25", "m1", "s1", 36.0, .03, 1, "2026-08-25T16:30:00+08:00"),
+             "2026-08-25", "m1", "s1", None, None, None, None, None, None,
+             36.0, .03, 1, "2026-08-25T16:30:00+08:00"),
             (2, "2026-08-19T16:30:00+08:00", "2026-08-19", 35.0, "買進", .72,
-             "2026-08-26", "m2", "s2", None, None, None, None),
+             "2026-08-26", "m2", "s2", 35.2, 35.0, 35.4, 34.0, 36.4, 37.6,
+             None, None, None, None),
         ])
 
 
@@ -34,11 +38,18 @@ def test_export_history_is_sanitized_and_newest_first(tmp_path):
     assert [row["id"] for row in payload["records"]] == [2, 1]
     assert payload["records"][0]["settlement_status"] == "等待結算"
     assert payload["records"][0]["counts_as_trade"] is True
+    assert payload["records"][0]["trade_levels_available"] is True
+    assert payload["records"][0]["suggested_entry"] == 35.2
+    assert payload["records"][0]["entry_low"] == 35.0
+    assert payload["records"][0]["take_profit_2"] == 37.6
     no_trade = payload["records"][1]
     assert no_trade["settlement_status"] == "已結算"
     assert no_trade["counts_as_trade"] is False
     assert no_trade["actual_return_pct"] is None
     assert no_trade["prediction_success"] is None
+    assert no_trade["trade_levels_available"] is False
+    assert no_trade["suggested_entry"] is None
+    assert no_trade["stop_price"] is None
     assert "disclaimer" in payload
     assert "indicators_json" not in no_trade
 

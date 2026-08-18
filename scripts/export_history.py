@@ -27,6 +27,8 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
         rows = con.execute("""
             SELECT id, predicted_at, market_date, market_price, action,
                    model_probability, valid_until, model_version, strategy_version,
+                   suggested_entry, entry_low, entry_high, stop_price,
+                   take_profit_1, take_profit_2,
                    actual_close, actual_return, prediction_success, settled_at
             FROM predictions
             ORDER BY id DESC
@@ -36,6 +38,10 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
     for row in rows:
         actionable = row["action"] != "不交易"
         settled = row["settled_at"] is not None
+        has_trade_levels = actionable and all(
+            row[name] is not None for name in (
+                "suggested_entry", "entry_low", "entry_high", "stop_price",
+                "take_profit_1", "take_profit_2"))
         records.append({
             "id": row["id"],
             "predicted_at": row["predicted_at"],
@@ -46,6 +52,13 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
             "valid_until": row["valid_until"],
             "model_version": row["model_version"],
             "strategy_version": row["strategy_version"],
+            "trade_levels_available": has_trade_levels,
+            "suggested_entry": row["suggested_entry"] if has_trade_levels else None,
+            "entry_low": row["entry_low"] if has_trade_levels else None,
+            "entry_high": row["entry_high"] if has_trade_levels else None,
+            "stop_price": row["stop_price"] if has_trade_levels else None,
+            "take_profit_1": row["take_profit_1"] if has_trade_levels else None,
+            "take_profit_2": row["take_profit_2"] if has_trade_levels else None,
             "settlement_status": "已結算" if settled else "等待結算",
             "actual_close": row["actual_close"] if settled else None,
             "actual_return_pct": (row["actual_return"] if settled and actionable else None),
@@ -60,7 +73,7 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
         "limit": limit,
         "count": len(records),
         "disclaimer": DISCLAIMER,
-        "privacy": "僅公開查詢必要欄位；不包含 SQLite、技術指標 snapshot 或內部推理。",
+        "privacy": "僅公開查詢必要欄位及原始交易價位；不包含 SQLite、技術指標 snapshot 或內部推理。",
         "records": records,
     }
 
