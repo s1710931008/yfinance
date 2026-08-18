@@ -52,6 +52,12 @@ curl --fail https://s1710931008.github.io/yfinance/latest.json
 選擇 **GitHub Actions**。此網址公開最新 JSON，但不公開 SQLite；GitHub Pages 是靜態發布，
 不提供身分驗證或即時計算，內容只會在 workflow 成功後更新。
 
+GitHub Pages 首頁會直接將 `latest.json` 顯示為中文儀表板，包含最新行情日期、模型機率、
+OOS／Final Test 回測、驗證門檻、分層結果、風險及 SQLite prediction ID。首頁也會讀取
+公開的 GitHub Actions API 顯示最近一次 workflow 的等待、執行、成功或失敗狀態。
+若必要驗證資料缺少或未通過，頁面正式結論固定顯示「不交易／資料不足」，且不顯示
+可執行的買進、停損或停利價格。
+
 確認依賴已安裝：
 
 ```bash
