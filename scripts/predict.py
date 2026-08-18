@@ -13,6 +13,8 @@ import json
 import math
 import sqlite3
 import sys
+import urllib.parse
+import urllib.request
 import warnings
 from dataclasses import asdict, dataclass
 from typing import Iterable
@@ -106,12 +108,77 @@ def _clean_ohlcv_frame(frame: pd.DataFrame, symbol: str) -> pd.DataFrame:
     return frame[~frame.index.duplicated(keep="last")]
 
 
+def _twse_month_rows(stock_no: str, date: pd.Timestamp) -> dict[pd.Timestamp, dict[str, float]]:
+    """Return official TWSE daily OHLCV rows for one calendar month."""
+    query = urllib.parse.urlencode({
+        "response": "json", "date": date.strftime("%Y%m%d"), "stockNo": stock_no,
+    })
+    request = urllib.request.Request(
+        f"https://www.twse.com.tw/exchangeReport/STOCK_DAY?{query}",
+        headers={"User-Agent": "00631L-research-validation/20260819.2"},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.load(response)
+    if payload.get("stat") != "OK":
+        raise RuntimeError(f"TWSE {stock_no}: {payload.get('stat', 'unknown response')}")
+    rows: dict[pd.Timestamp, dict[str, float]] = {}
+    for values in payload.get("data", []):
+        if len(values) < 8:
+            continue
+        roc_year, month, day = (int(part) for part in values[0].split("/"))
+        row_date = pd.Timestamp(roc_year + 1911, month, day)
+        try:
+            rows[row_date] = {
+                "Open": float(values[3].replace(",", "")),
+                "High": float(values[4].replace(",", "")),
+                "Low": float(values[5].replace(",", "")),
+                "Close": float(values[6].replace(",", "")),
+                "Volume": float(values[1].replace(",", "")),
+            }
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def _fill_twse_gaps(frame: pd.DataFrame, symbol: str) -> tuple[pd.DataFrame, list[str]]:
+    """Fill incomplete Yahoo rows from official TWSE data for matching dates only."""
+    if not symbol.endswith(".TW") or frame.empty:
+        return frame, []
+    if isinstance(frame.columns, pd.MultiIndex):
+        frame = frame.copy()
+        frame.columns = frame.columns.get_level_values(0)
+    needed = ["Open", "High", "Low", "Close", "Volume"]
+    if not set(needed).issubset(frame.columns):
+        return frame, []
+    frame = frame.copy()
+    frame.index = pd.to_datetime(frame.index).tz_localize(None)
+    numeric = frame[needed].apply(pd.to_numeric, errors="coerce")
+    incomplete = numeric[needed].isna().any(axis=1)
+    gap_dates = list(numeric.index[incomplete])
+    if not gap_dates:
+        return frame, []
+    official: dict[pd.Timestamp, dict[str, float]] = {}
+    for month in sorted({date.to_period("M") for date in gap_dates}):
+        official.update(_twse_month_rows(symbol.removesuffix(".TW"), month.to_timestamp()))
+    filled: list[str] = []
+    for gap_date in gap_dates:
+        values = official.get(pd.Timestamp(gap_date))
+        if values is None:
+            continue
+        frame.loc[gap_date, needed] = [values[name] for name in needed]
+        filled.append(str(pd.Timestamp(gap_date).date()))
+    return frame, filled
+
+
 def _flat_download(symbol: str, period: str) -> pd.DataFrame:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         frame = yf.download(symbol, period=period, auto_adjust=True, progress=False,
                             actions=False, threads=False)
-    return _clean_ohlcv_frame(frame, symbol)
+    frame, fallback_dates = _fill_twse_gaps(frame, symbol)
+    cleaned = _clean_ohlcv_frame(frame, symbol)
+    cleaned.attrs["twse_fallback_dates"] = fallback_dates
+    return cleaned
 
 
 def download_data(ticker: str, context: Iterable[str], period: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], list[str]]:
@@ -717,8 +784,8 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260819.1"
-STRATEGY_VERSION = "20260819.1"
+MODEL_VERSION = "20260819.2"
+STRATEGY_VERSION = "20260819.2"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 
@@ -999,8 +1066,11 @@ def main() -> int:
         "holding": holding,
         "confidence": ("高" if executable else "低"),
         "data_source_snapshot": {
-            "source": "Yahoo Finance via yfinance",
-            "price_type": "auto-adjusted daily OHLCV",
+            "source": ("Yahoo Finance via yfinance；缺值列由臺灣證券交易所 STOCK_DAY 補齊"
+                       if primary.attrs.get("twse_fallback_dates") else
+                       "Yahoo Finance via yfinance"),
+            "price_type": "Yahoo auto-adjusted daily OHLCV；TWSE 備援列為官方日成交資料",
+            "twse_fallback_dates": primary.attrs.get("twse_fallback_dates", []),
             "market_date": str(latest.index[0].date()),
             "timezone": "Asia/Taipei",
             "downloaded_at": dt.datetime.now(TAIPEI).isoformat(),

@@ -39,6 +39,32 @@ def test_clean_ohlcv_rejects_no_complete_rows():
         predict._clean_ohlcv_frame(frame, "00631L.TW")
 
 
+def test_twse_fallback_fills_only_matching_incomplete_date(monkeypatch):
+    frame = market_frame()
+    gap_date = frame.index[-1]
+    frame.loc[gap_date, ["Open", "High", "Low", "Close"]] = np.nan
+    official = {gap_date: {
+        "Open": 35.88, "High": 35.90, "Low": 34.81,
+        "Close": 34.81, "Volume": 167876262.0,
+    }}
+    monkeypatch.setattr(predict, "_twse_month_rows", lambda *_args: official)
+    filled, dates = predict._fill_twse_gaps(frame, "00631L.TW")
+    assert dates == [str(gap_date.date())]
+    assert filled.loc[gap_date, "Close"] == 34.81
+    assert filled.loc[gap_date, "Volume"] == 167876262.0
+    assert filled.loc[frame.index[-2], "Close"] == frame.loc[frame.index[-2], "Close"]
+
+
+def test_twse_fallback_does_not_run_for_complete_yahoo_data(monkeypatch):
+    monkeypatch.setattr(
+        predict, "_twse_month_rows",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("unexpected TWSE request")),
+    )
+    filled, dates = predict._fill_twse_gaps(market_frame(), "00631L.TW")
+    assert dates == []
+    pd.testing.assert_frame_equal(filled, market_frame())
+
+
 def test_simulation_applies_costs_and_target():
     market = market_frame()
     rows = market.iloc[[0]].copy()
