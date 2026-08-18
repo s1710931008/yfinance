@@ -20,6 +20,7 @@
 - README 補充 GitHub Actions 操作方式、保存期限及非永久備份限制。
 - README 補充 GET 網址、GitHub Pages 首次啟用方式與公開資料限制。
 - Pages workflow 或公開入口檔案推送至 `main` 時會自動執行，避免部署設定更新後仍需額外手動觸發。
+- 將 checkout、setup-python、cache、artifact 與 GitHub Pages 官方 Actions 升級至 Node.js 24 版本，移除 Node.js 20 淘汰與舊 `punycode` 相依警告。
 
 ### Fixed
 
@@ -31,6 +32,7 @@
 - 預期不影響訊號、勝率、交易頻率、報酬、最大回撤、Profit Factor 或風險報酬比。
 - 未新增參數搜尋或模型選擇，因此不增加模型過度擬合風險。
 - 發布內容只包含既有 `validation.json`；不公開 SQLite，亦不提供新的推測資料。
+- Actions 執行環境相依升級不修改模型或策略行為；可能只影響 CI 啟動、cache 與 artifact 處理方式。
 
 ### Validation
 
@@ -39,6 +41,7 @@
 - 尚未取得首次 GitHub-hosted runner 執行結果；上線後由手動或排程執行確認。
 - GitHub Pages GET 發布待推送後進行首次部署驗證。
 - 針對首次 GET 取得 404，補上 push 觸發並保留手動與平日排程觸發方式。
+- Node.js 24 Actions 升級後，本機 8 項測試與 workflow YAML 靜態檢查均通過；GitHub-hosted runner 驗證待推送後確認。
 - 正式排程執行仍須通過既有 Walk-Forward 與獨立 OOS 驗證門檻；失敗時不得提供買賣建議。
 
 ### Version
@@ -47,6 +50,7 @@
 - 模型版本：不變。
 - 策略版本：不變。
 - 使用者確認：2026-08-18，使用者回覆「掛上」。
+- 使用者確認：2026-08-18，使用者回覆「確認升級 Node 24 Actions」。
 
 ## [20260818.1] - 2026-08-18
 
