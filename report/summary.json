@@ -1,0 +1,13 @@
+{
+  "fold_files": [
+    "./outputs/result-fold-0.json"
+  ],
+  "n_rows": 336,
+  "oos_prob_summary": {
+    "predictions": 336,
+    "signals": 336,
+    "buy_precision": 0.125
+  },
+  "n_trades": 0,
+  "trades": []
+}

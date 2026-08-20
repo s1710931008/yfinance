@@ -2,11 +2,12 @@
 """
 Run a single walk-forward fold using the functions defined in scripts/predict.py.
 
-Produces outputs/result_fold_<fold>.json with:
+Produces outputs/result-fold-<fold>.json with:
 - fold index
 - test rows (date + probability + label)
 - fold trades (list)
 - fold metrics (trade_metrics)
+- fold summary: probability mean/median/std/quantiles, num_above_threshold, threshold
 """
 from __future__ import annotations
 import argparse
@@ -41,7 +42,7 @@ def parse_args():
     p.add_argument("--min-train", type=int, default=252)
     p.add_argument("--feature-set", choices=["baseline", "all"], default="all")
     p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees")
-    p.add_argument("--output", default="outputs/result_fold.json")
+    p.add_argument("--output", default="outputs/result-fold.json")
     p.add_argument("--no-record", action="store_true")
     return p.parse_args()
 
@@ -50,7 +51,7 @@ def main():
     args = parse_args()
     mod = load_predict_module()
 
-    # Match predict.py defaults for threshold if not provided
+    # Default threshold consistent with predict.py
     if args.threshold is None:
         args.threshold = 0.22 if args.model == "extra-trees" else 0.70
 
@@ -79,7 +80,28 @@ def main():
         prob_values, base, calibrator = mod.calibrated_fit_predict(train, test, features, purge=0, model_kind=args.model)
         test = test.copy()
         test["probability"] = prob_values
-        # simulate trades for this fold
+
+        # compute extra summary stats for diagnostics
+        probs = test["probability"].to_numpy(dtype=float)
+        import numpy as _np
+        summary = {}
+        if probs.size > 0:
+            summary["mean_probability"] = float(_np.nanmean(probs))
+            summary["median_probability"] = float(_np.nanmedian(probs))
+            summary["std_probability"] = float(_np.nanstd(probs, ddof=0))
+            q = _np.nanpercentile(probs, [0, 25, 50, 75, 100]).tolist()
+            summary["probability_quantiles"] = {"p0": float(q[0]), "p25": float(q[1]),
+                                                "p50": float(q[2]), "p75": float(q[3]), "p100": float(q[4])}
+        else:
+            summary["mean_probability"] = None
+            summary["median_probability"] = None
+            summary["std_probability"] = None
+            summary["probability_quantiles"] = {}
+
+        summary["threshold"] = float(args.threshold)
+        summary["num_above_threshold"] = int((test["probability"] >= args.threshold).sum())
+
+        # simulate trades for this fold (uses provided threshold in simulation later if needed)
         trades = mod.simulate(test, primary, args.threshold, args.horizon, stop_atr=1.5,
                               reward_risk=2.0, commission_bps=14.25, tax_bps=10.0, slippage_bps=5.0,
                               entry_gap_low_atr=None, entry_gap_high_atr=None)
@@ -99,6 +121,7 @@ def main():
             "model": args.model,
             "feature_set": args.feature_set,
             "ticker": args.ticker,
+            "summary": summary,
         }
 
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
