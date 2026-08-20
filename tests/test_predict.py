@@ -204,6 +204,33 @@ def test_build_dataset_has_context_and_no_tail_labels():
     assert any(name.startswith("ctx_TWII") for name in features)
     assert {"rsi14", "kd_k", "kd_d", "macd_hist", "cmf20", "obv_momentum20"} <= set(features)
     assert data.label.tail(5).isna().all()
+    assert data.future_return.tail(5).isna().all()
+    assert data.future_high_return.tail(5).isna().all()
+    assert data.future_low_return.tail(5).isna().all()
+
+
+def test_simulation_can_require_positive_predicted_return():
+    market = market_frame()
+    rows = market.iloc[[0]].copy()
+    rows["probability"], rows["ATR"], rows["regime"] = .9, 1., "bull"
+    rows["predicted_return"] = -.01
+    trades = predict.simulate(
+        rows, market, .7, 5, 1.5, 2, 0, 0, 0,
+        minimum_predicted_return=.01)
+    assert trades == []
+
+
+def test_return_model_produces_ordered_price_interval():
+    idx = pd.date_range("2024-01-01", periods=140, freq="B")
+    train = pd.DataFrame({
+        "x": np.linspace(-1, 1, 120),
+        "future_return": np.linspace(-.05, .05, 120),
+    }, index=idx[:120])
+    test = pd.DataFrame({"x": [-.25, .25]}, index=idx[120:122])
+    median, low, high = predict.return_fit_predict(train, test, ["x"])
+    assert np.isfinite(median).all()
+    assert (low <= median).all()
+    assert (median <= high).all()
 
 
 def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path):
