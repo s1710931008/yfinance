@@ -3,11 +3,36 @@
     "./outputs/result-fold-0.json"
   ],
   "n_rows": 336,
-  "oos_prob_summary": {
-    "predictions": 336,
-    "signals": 336,
-    "buy_precision": 0.125
+  "threshold": 0.22,
+  "signals": 0,
+  "buy_precision": null,
+  "mean_probability": 0.05837894890091694,
+  "probability_quantiles": {
+    "0.0": 0.05577582454130639,
+    "0.25": 0.05689301776210149,
+    "0.5": 0.058111748330162596,
+    "0.75": 0.05977179149628698,
+    "1.0": 0.06292724563741936
   },
   "n_trades": 0,
-  "trades": []
+  "trades": [],
+  "fold_summaries": [
+    {
+      "file": "./outputs/result-fold-0.json",
+      "summary": {
+        "mean_probability": 0.05837894890091694,
+        "median_probability": 0.058111748330162596,
+        "std_probability": 0.0016869682773207027,
+        "probability_quantiles": {
+          "p0": 0.05577582454130639,
+          "p25": 0.05689301776210149,
+          "p50": 0.058111748330162596,
+          "p75": 0.05977179149628698,
+          "p100": 0.06292724563741936
+        },
+        "threshold": 0.22,
+        "num_above_threshold": 0
+      }
+    }
+  ]
 }
