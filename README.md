@@ -251,8 +251,8 @@ EV 仍為正、PF 至少 1.10，才會顯示建議買進區間。任何一項未
 | `--final-test` | 完全保留的最終測試比例 | `0.20` |
 | `--stop-atr` | 停損 ATR 倍數 | `1.5` |
 | `--reward-risk` | 停利的 R 倍數 | `2.0` |
-| `--entry-gap-low-atr` | 下一日開盤相對收盤的最低 ATR 缺口 | `0.15` |
-| `--entry-gap-high-atr` | 下一日開盤相對收盤的最高 ATR 缺口 | `0.55` |
+| `--entry-gap-low-atr` | 下一日開盤相對訊號收盤的最低 ATR 位移；負值代表低開 | CLI `0.15`；正式候選策略 `-0.25` |
+| `--entry-gap-high-atr` | 下一日開盤相對訊號收盤的最高 ATR 位移 | CLI `0.55`；正式候選策略 `0.25` |
 | `--feature-set` | `baseline` 基礎版或 `all` 全指標版 | `all` |
 | `--model` | `extra-trees` 實驗升級版或 `logistic` 基準版 | `extra-trees` |
 | `--database` | 追加保存預測紀錄的 SQLite 路徑 | `predictions.sqlite3` |

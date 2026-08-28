@@ -90,6 +90,16 @@ def test_entry_range_rejects_gap_up():
     )
 
 
+def test_entry_gap_validation_allows_gap_down_interval():
+    predict.validate_entry_gap_atr(-0.25, 0.25)
+
+
+def test_entry_gap_validation_rejects_unordered_or_nonfinite_interval():
+    for low, high in ((0.25, 0.25), (0.5, 0.25), (np.nan, 0.25), (-0.25, np.inf)):
+        with np.testing.assert_raises_regex(ValueError, "finite and satisfy low < high"):
+            predict.validate_entry_gap_atr(low, high)
+
+
 def test_same_bar_stop_and_target_is_conservative():
     market = market_frame()
     market.loc[market.index[1], ["High", "Low"]] = [104, 97]

@@ -61,9 +61,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--stop-atr", type=float, default=1.5)
     p.add_argument("--reward-risk", type=float, default=2.0)
     p.add_argument("--entry-gap-low-atr", type=float, default=0.15,
-                   help="Minimum next-open gap above signal close, in ATR (default: 0.15)")
+                   help="Minimum next-open displacement from signal close, in ATR; negative allows a gap down (default: 0.15)")
     p.add_argument("--entry-gap-high-atr", type=float, default=0.55,
-                   help="Maximum next-open gap above signal close, in ATR (default: 0.55)")
+                   help="Maximum next-open displacement from signal close, in ATR (default: 0.55)")
     p.add_argument("--commission-bps", type=float, default=14.25,
                    help="Commission per side in basis points")
     p.add_argument("--tax-bps", type=float, default=10.0,
@@ -820,8 +820,8 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260819.3"
-STRATEGY_VERSION = "20260819.3"
+MODEL_VERSION = "20260828.1"
+STRATEGY_VERSION = "20260828.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
@@ -833,6 +833,12 @@ CANDIDATE_20260819_3 = {
     "minimum_predicted_return": 0.005,
     "selection_scope": "最後15%獨立期間之前的預先限制候選集合",
 }
+
+
+def validate_entry_gap_atr(low: float, high: float) -> None:
+    """Validate an ordered, finite next-open displacement interval in ATR."""
+    if not math.isfinite(low) or not math.isfinite(high) or low >= high:
+        raise ValueError("entry gap ATR values must be finite and satisfy low < high")
 
 
 def return_forecast_metrics(rows: pd.DataFrame) -> dict[str, float | int | bool | None]:
@@ -988,8 +994,10 @@ def main() -> int:
         raise SystemExit("--shares and --average-cost must be positive")
     if args.add_shares <= 0:
         raise SystemExit("--add-shares must be positive")
-    if args.entry_gap_low_atr < 0 or args.entry_gap_high_atr <= args.entry_gap_low_atr:
-        raise SystemExit("entry gap ATR values must satisfy 0 <= low < high")
+    try:
+        validate_entry_gap_atr(args.entry_gap_low_atr, args.entry_gap_high_atr)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     context_symbols = list(args.context) + ([args.futures_symbol] if args.futures_symbol else [])
     primary, contexts, skipped = download_data(args.ticker, context_symbols, args.period)
     data, features = build_dataset(primary, contexts, args.horizon, args.target,
@@ -1148,7 +1156,7 @@ def main() -> int:
                        "next_open_known": False},
         "execution_plan": execution_plan,
         "price_forecast": price_forecast,
-        "candidate_strategy": {"version": "20260819.3",
+        "candidate_strategy": {"version": STRATEGY_VERSION,
                                "parameters": CANDIDATE_20260819_3,
                                "return_signal": return_signal,
                                "activated": executable},
