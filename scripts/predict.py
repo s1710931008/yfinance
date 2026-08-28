@@ -44,6 +44,7 @@ class Trade:
     reason: str
     regime: str
     net_return: float = 0.0
+    position_fraction: float = 1.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -392,7 +393,8 @@ def simulate(rows: pd.DataFrame, market: pd.DataFrame, threshold: float, horizon
              tax_bps: float, slippage_bps: float,
              entry_gap_low_atr: float | None = None,
              entry_gap_high_atr: float | None = None,
-             minimum_predicted_return: float | None = None) -> list[Trade]:
+             minimum_predicted_return: float | None = None,
+             risk_policy: bool = False) -> list[Trade]:
     loc = {date: i for i, date in enumerate(market.index)}
     trades: list[Trade] = []
     blocked_until = -1
@@ -404,6 +406,9 @@ def simulate(rows: pd.DataFrame, market: pd.DataFrame, threshold: float, horizon
                 and ("predicted_return" not in row
                      or not np.isfinite(row.predicted_return)
                      or row.predicted_return < minimum_predicted_return)):
+            continue
+        position_fraction = strategy_position_fraction(str(row.regime), risk_policy)
+        if position_fraction <= 0:
             continue
         entry_i = i + 1
         if entry_gap_low_atr is not None and entry_gap_high_atr is not None:
@@ -433,7 +438,8 @@ def simulate(rows: pd.DataFrame, market: pd.DataFrame, threshold: float, horizon
         trades.append(Trade(str(signal_date.date()), str(market.index[entry_i].date()),
                             str(market.index[exit_i].date()), entry, exit_px,
                             float(row.probability), gross_r, net_r, reason, str(row.regime),
-                            (exit_px - entry - costs) / entry))
+                            ((exit_px - entry - costs) / entry) * position_fraction,
+                            position_fraction))
         blocked_until = exit_i + 1
     return trades
 
@@ -534,7 +540,8 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
             rows, market, args.threshold, args.horizon, args.stop_atr,
             args.reward_risk, args.commission_bps, args.tax_bps,
             args.slippage_bps, args.entry_gap_low_atr, args.entry_gap_high_atr,
-            getattr(args, "minimum_predicted_return", None)))
+            getattr(args, "minimum_predicted_return", None),
+            getattr(args, "risk_policy", False)))
         fold_metrics.append({"fold": int(fold), **metrics})
     fold_win_rates = [m["win_rate"] for m in fold_metrics if m["win_rate"] is not None]
     all_folds_have_trades = (len(fold_metrics) >= 2
@@ -552,7 +559,7 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
             oos_metrics["profit_factor"] is not None and oos_metrics["profit_factor"] >= 1.2,
         "max_drawdown_at_most_25pct":
             oos_metrics["max_drawdown_pct"] is not None
-            and oos_metrics["max_drawdown_pct"] <= 0.25,
+            and oos_metrics["max_drawdown_pct"] <= 0.249,
         "oos_vs_development_winrate_gap_at_most_10pp":
             win_rate_gap_pp is not None and win_rate_gap_pp <= 10,
         "walk_forward_and_independent_oos_completed":
@@ -570,7 +577,11 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
         "independent_oos_winrate": final_metrics["win_rate"],
         "oos_vs_development_winrate_gap_pp": win_rate_gap_pp,
         "folds": fold_metrics,
-        "drawdown_basis": "每筆交易將配置給 00631L 的資金全額投入，扣成本後逐筆複利",
+        "max_drawdown_limit": 0.249,
+        "drawdown_basis": ("以配置給 00631L 的資金為分母；一般市場投入 85%、"
+                           "多頭高波動投入 50%、空頭高波動不進場，扣成本後逐筆複利"
+                           if getattr(args, "risk_policy", False) else
+                           "每筆交易將配置給 00631L 的資金全額投入，扣成本後逐筆複利"),
         "comparison_basis": "開發期 Walk-Forward OOS 與完全隔離 Final Test 比較",
     }
 
@@ -589,13 +600,15 @@ def strict_entry_validation(data: pd.DataFrame, features: list[str], market: pd.
                 args.reward_risk, args.commission_bps, args.tax_bps,
                 args.slippage_bps, args.entry_gap_low_atr,
                 args.entry_gap_high_atr,
-                getattr(args, "minimum_predicted_return", None)))
+                getattr(args, "minimum_predicted_return", None),
+                getattr(args, "risk_policy", False)))
             stressed = trade_metrics(simulate(
                 rows, market, args.threshold, args.horizon, args.stop_atr,
                 args.reward_risk, args.commission_bps * 2, args.tax_bps * 2,
                 args.slippage_bps * 2, args.entry_gap_low_atr,
                 args.entry_gap_high_atr,
-                getattr(args, "minimum_predicted_return", None)))
+                getattr(args, "minimum_predicted_return", None),
+                getattr(args, "risk_policy", False)))
             runs.append({"final_fraction": final_fraction, "folds": folds,
                          "normal_cost": normal, "double_cost": stressed})
 
@@ -820,8 +833,8 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260828.1"
-STRATEGY_VERSION = "20260828.1"
+MODEL_VERSION = "20260828.2"
+STRATEGY_VERSION = "20260828.2"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
@@ -833,6 +846,26 @@ CANDIDATE_20260819_3 = {
     "minimum_predicted_return": 0.005,
     "selection_scope": "最後15%獨立期間之前的預先限制候選集合",
 }
+
+RISK_POLICY_20260828_2 = {
+    "capital_denominator": "配置給 00631L 的資金",
+    "normal_fraction": 0.85,
+    "bull_high_vol_fraction": 0.50,
+    "bear_high_vol_fraction": 0.0,
+    "max_drawdown_limit": 0.249,
+    "threshold_selection": "固定沿用預先選定的 0.15；不使用 OOS 事後挑選",
+}
+
+
+def strategy_position_fraction(regime: str, enabled: bool) -> float:
+    """Return the precommitted fraction of 00631L-allocated capital."""
+    if not enabled:
+        return 1.0
+    if regime == "bear_high_vol":
+        return RISK_POLICY_20260828_2["bear_high_vol_fraction"]
+    if regime == "bull_high_vol":
+        return RISK_POLICY_20260828_2["bull_high_vol_fraction"]
+    return RISK_POLICY_20260828_2["normal_fraction"]
 
 
 def validate_entry_gap_atr(low: float, high: float) -> None:
@@ -984,6 +1017,9 @@ def main() -> int:
         for name, value in CANDIDATE_20260819_3.items():
             if name != "selection_scope":
                 setattr(args, name, value)
+    args.risk_policy = bool(
+        args.ticker.upper() in {"00631L", "00631L.TW"}
+        and args.model == "extra-trees" and args.feature_set == "all")
     if not 0.10 <= args.final_test <= 0.40:
         raise SystemExit("--final-test must be between 0.10 and 0.40")
     if args.horizon < 1 or args.folds < 2 or not 0 < args.threshold < 1:
@@ -1010,7 +1046,8 @@ def main() -> int:
     oos_trades = simulate(oos, primary, args.threshold, args.horizon, args.stop_atr,
                           args.reward_risk, args.commission_bps, args.tax_bps,
                           args.slippage_bps, args.entry_gap_low_atr,
-                          args.entry_gap_high_atr, args.minimum_predicted_return)
+                          args.entry_gap_high_atr, args.minimum_predicted_return,
+                          args.risk_policy)
     oos_prob, oos_tm = probability_metrics(oos, args.threshold), trade_metrics(oos_trades)
     oos_return_forecast = return_forecast_metrics(oos)
     annual, regimes = grouped_metrics(oos_trades, "year"), grouped_metrics(oos_trades, "regime")
@@ -1028,7 +1065,8 @@ def main() -> int:
     final_trades = simulate(final, primary, args.threshold, args.horizon, args.stop_atr,
                             args.reward_risk, args.commission_bps, args.tax_bps,
                             args.slippage_bps, args.entry_gap_low_atr,
-                            args.entry_gap_high_atr, args.minimum_predicted_return)
+                            args.entry_gap_high_atr, args.minimum_predicted_return,
+                            args.risk_policy)
     final_prob, final_tm = probability_metrics(final, args.threshold), trade_metrics(final_trades)
     final_return_forecast = return_forecast_metrics(final)
     required_validation = formal_validation(oos, primary, oos_tm, final_tm, args)
@@ -1091,10 +1129,13 @@ def main() -> int:
     formal_passed = bool(required_validation["passed"])
     strict_passed = bool(strict_entry["passed"])
     latest_signal = bool(latest_probability >= args.threshold)
+    latest_position_fraction = strategy_position_fraction(
+        str(latest_row.get("regime", "unknown")), args.risk_policy)
     forecast_validation_passed = bool(
         oos_return_forecast["passed"] and final_return_forecast["passed"])
     return_signal = latest_predicted_return >= args.minimum_predicted_return
-    executable = bool(latest_signal and return_signal and formal_passed and gate["passed"]
+    executable = bool(latest_signal and latest_position_fraction > 0 and return_signal
+                      and formal_passed and gate["passed"]
                       and strict_passed and forecast_validation_passed)
     candidate_low = latest_close + args.entry_gap_low_atr * latest_atr
     candidate_high = latest_close + args.entry_gap_high_atr * latest_atr
@@ -1106,10 +1147,13 @@ def main() -> int:
         "suggested_entry": candidate_entry if executable else None,
         "entry_low": candidate_low if executable else None,
         "entry_high": candidate_high if executable else None,
-        "tranches": ([{"price": candidate_high, "capital_ratio": 0.50},
-                       {"price": candidate_low, "capital_ratio": 0.50}]
+        "tranches": ([{"price": candidate_high,
+                        "capital_ratio": latest_position_fraction / 2},
+                       {"price": candidate_low,
+                        "capital_ratio": latest_position_fraction / 2}]
                       if executable else []),
         "position_sizing_denominator": "配置給 00631L 的資金",
+        "maximum_capital_ratio": latest_position_fraction,
         "stop": candidate_entry - candidate_risk if executable else None,
         "take_profit_1": candidate_entry + candidate_risk if executable else None,
         "take_profit_2": candidate_entry + args.reward_risk * candidate_risk if executable else None,
@@ -1158,6 +1202,7 @@ def main() -> int:
         "price_forecast": price_forecast,
         "candidate_strategy": {"version": STRATEGY_VERSION,
                                "parameters": CANDIDATE_20260819_3,
+                               "risk_policy": RISK_POLICY_20260828_2,
                                "return_signal": return_signal,
                                "activated": executable},
         "context_used": list(contexts), "context_skipped": skipped,
@@ -1226,7 +1271,7 @@ def main() -> int:
         "effective_trades_at_least_30": "有效交易樣本數 ≥ 30",
         "walk_forward_winrate_std_at_most_15pp": "Walk-Forward fold 勝率標準差 ≤ 15 個百分點",
         "profit_factor_at_least_1_2": "Profit Factor ≥ 1.2",
-        "max_drawdown_at_most_25pct": "最大回撤 ≤ 25%",
+        "max_drawdown_at_most_25pct": "最大回撤 ≤ 24.9%",
         "oos_vs_development_winrate_gap_at_most_10pp": "OOS 與開發期勝率差異 ≤ 10 個百分點",
         "walk_forward_and_independent_oos_completed": "Walk-Forward 與獨立 OOS 已完成",
     }

@@ -100,6 +100,21 @@ def test_entry_gap_validation_rejects_unordered_or_nonfinite_interval():
             predict.validate_entry_gap_atr(low, high)
 
 
+def test_00631l_risk_policy_scales_or_blocks_regimes():
+    assert predict.strategy_position_fraction("bull", True) == .85
+    assert predict.strategy_position_fraction("bull_high_vol", True) == .50
+    assert predict.strategy_position_fraction("bear_high_vol", True) == 0
+    assert predict.strategy_position_fraction("bear_high_vol", False) == 1
+
+
+def test_risk_policy_blocks_bear_high_vol_trade():
+    market = market_frame()
+    rows = market.iloc[[0]].copy()
+    rows["probability"], rows["ATR"], rows["regime"] = .9, 1., "bear_high_vol"
+    assert not predict.simulate(rows, market, .7, 5, 1.5, 2, 0, 0, 0,
+                                risk_policy=True)
+
+
 def test_same_bar_stop_and_target_is_conservative():
     market = market_frame()
     market.loc[market.index[1], ["High", "Low"]] = [104, 97]
@@ -175,6 +190,25 @@ def test_formal_validation_rejects_empty_walk_forward_fold(monkeypatch):
     assert not validation["passed"]
     assert validation["fold_winrate_std_pp"] is None
     assert not validation["all_folds_have_trades"]
+
+
+def test_formal_validation_enforces_24_9pct_drawdown_limit(monkeypatch):
+    monkeypatch.setattr(
+        predict, "simulate",
+        lambda *_args, **_kwargs: [
+            predict.Trade("", "", "", 1, 1, .8, 1, 1, "time", "bull", .01)
+        ],
+    )
+    rows = pd.DataFrame({"fold": [1, 2]})
+    args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
+                           commission_bps=14.25, tax_bps=10, slippage_bps=5,
+                           entry_gap_low_atr=.15, entry_gap_high_atr=.55)
+    oos = {"trades": 30, "win_rate": .60, "profit_factor": 1.5,
+           "max_drawdown_pct": .25}
+    final = {"trades": 10, "win_rate": .55}
+    validation = predict.formal_validation(rows, pd.DataFrame(), oos, final, args)
+    assert not validation["checks"]["max_drawdown_at_most_25pct"]
+    assert validation["max_drawdown_limit"] == .249
 
 
 def test_trading_gate_requires_all_conditions():
