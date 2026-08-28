@@ -138,6 +138,22 @@ def test_research_price_forecast_hides_prices_when_validation_fails():
     assert "價格模型自身驗證未通過" in forecast["unavailable_reason"]
 
 
+def test_research_return_model_does_not_read_test_outcomes():
+    rng = np.random.default_rng(42)
+    train = pd.DataFrame({
+        "x": rng.normal(size=220),
+        "future_return": rng.normal(scale=.03, size=220),
+    })
+    test = pd.DataFrame({"x": [-1., 0., 1.], "future_return": [99., 99., 99.]})
+    first = predict.research_return_fit_predict(train, test, ["x"])
+    test["future_return"] = [-99., -99., -99.]
+    second = predict.research_return_fit_predict(train, test, ["x"])
+    np.testing.assert_allclose(first[0], second[0])
+    np.testing.assert_allclose(first[1], second[1])
+    np.testing.assert_allclose(first[2], second[2])
+    assert first[3]["selection_scope"].startswith("僅使用")
+
+
 def test_same_bar_stop_and_target_is_conservative():
     market = market_frame()
     market.loc[market.index[1], ["High", "Low"]] = [104, 97]

@@ -25,7 +25,7 @@ import pandas as pd
 import yfinance as yf
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -357,9 +357,99 @@ def return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
             np.quantile(tree_predictions, 0.90, axis=0))
 
 
+RESEARCH_RETURN_CANDIDATES = (
+    "zero", "historical_mean", "ridge",
+    "extra_trees_shrink_0.10", "extra_trees_shrink_0.25",
+    "extra_trees_shrink_0.50", "extra_trees_shrink_0.75",
+    "extra_trees_shrink_1.00",
+)
+
+
+def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
+                                features: list[str]) -> tuple[np.ndarray, np.ndarray,
+                                                              np.ndarray, dict[str, object]]:
+    """Select a research-only centre on trailing calibration data and conformalize it."""
+    usable = train.dropna(subset=["future_return"])
+    if len(usable) < 100:
+        raise RuntimeError("insufficient known returns for research price model")
+    split = max(int(len(usable) * 0.8), len(usable) - 126)
+    split = min(max(split, 50), len(usable) - 30)
+    fit, calibration = usable.iloc[:split], usable.iloc[split:]
+
+    imputer = SimpleImputer(strategy="median")
+    x_fit = imputer.fit_transform(fit[features])
+    x_cal = imputer.transform(calibration[features])
+    x_test = imputer.transform(test[features])
+    y_fit = fit.future_return.to_numpy(dtype=float)
+    y_cal = calibration.future_return.to_numpy(dtype=float)
+
+    extra = ExtraTreesRegressor(
+        n_estimators=300, min_samples_leaf=12, max_features=0.7,
+        random_state=44, n_jobs=-1)
+    extra.fit(x_fit, y_fit)
+    extra_cal = extra.predict(x_cal)
+    extra_test = extra.predict(x_test)
+
+    ridge = Ridge(alpha=10.0)
+    ridge.fit(x_fit, y_fit)
+    mean_return = float(np.mean(y_fit))
+    calibration_candidates: dict[str, np.ndarray] = {
+        "zero": np.zeros(len(calibration)),
+        "historical_mean": np.full(len(calibration), mean_return),
+        "ridge": ridge.predict(x_cal),
+    }
+    test_candidates: dict[str, np.ndarray] = {
+        "zero": np.zeros(len(test)),
+        "historical_mean": np.full(len(test), mean_return),
+        "ridge": ridge.predict(x_test),
+    }
+    for shrink in (0.10, 0.25, 0.50, 0.75, 1.00):
+        name = f"extra_trees_shrink_{shrink:.2f}"
+        calibration_candidates[name] = extra_cal * shrink
+        test_candidates[name] = extra_test * shrink
+
+    calibration_mae = {
+        name: float(np.mean(np.abs(y_cal - prediction)))
+        for name, prediction in calibration_candidates.items()
+    }
+    calibration_direction = {
+        name: float(np.mean(np.sign(y_cal) == np.sign(prediction)))
+        for name, prediction in calibration_candidates.items()
+    }
+    direction_qualified = [
+        name for name in RESEARCH_RETURN_CANDIDATES
+        if calibration_direction[name] >= 0.52
+    ]
+    selection_pool = direction_qualified or list(RESEARCH_RETURN_CANDIDATES)
+    selected = min(selection_pool,
+                   key=lambda name: (calibration_mae[name], name))
+    selected_cal = calibration_candidates[selected]
+    selected_test = test_candidates[selected]
+    errors = np.abs(y_cal - selected_cal)
+    quantile_level = min(1.0, math.ceil((len(errors) + 1) * 0.80) / len(errors))
+    try:
+        radius = float(np.quantile(errors, quantile_level, method="higher"))
+    except TypeError:  # NumPy < 1.22 compatibility.
+        radius = float(np.quantile(errors, quantile_level, interpolation="higher"))
+    metadata = {
+        "selected_model": selected,
+        "calibration_samples": len(calibration),
+        "calibration_mae": calibration_mae[selected],
+        "candidate_mae": calibration_mae,
+        "calibration_direction_accuracy": calibration_direction[selected],
+        "candidate_direction_accuracy": calibration_direction,
+        "direction_constraint": 0.52,
+        "conformal_target_coverage": 0.80,
+        "conformal_radius": radius,
+        "selection_scope": "僅使用該 fold 訓練窗口尾端時間順序校準期",
+    }
+    return selected_test, selected_test - radius, selected_test + radius, metadata
+
+
 def walk_forward(dev: pd.DataFrame, features: list[str], folds: int,
                  min_train: int, purge: int = 0,
-                 model_kind: str = "logistic") -> pd.DataFrame:
+                 model_kind: str = "logistic",
+                 include_research: bool = True) -> pd.DataFrame:
     if len(dev) < min_train + folds * 20:
         raise RuntimeError(f"insufficient history: {len(dev)} usable rows; need at least {min_train + folds * 20}")
     boundaries = np.linspace(min_train, len(dev), folds + 1, dtype=int)
@@ -373,6 +463,12 @@ def walk_forward(dev: pd.DataFrame, features: list[str], folds: int,
             train, test, features, purge, model_kind)
         (test["predicted_return"], test["predicted_return_low"],
          test["predicted_return_high"]) = return_fit_predict(train, test, features)
+        if include_research:
+            (test["research_predicted_return"], test["research_predicted_return_low"],
+             test["research_predicted_return_high"], research_meta) = (
+                research_return_fit_predict(train, test, features))
+            test["research_model"] = research_meta["selected_model"]
+            test["research_conformal_radius"] = research_meta["conformal_radius"]
         test["fold"] = fold + 1
         out.append(test)
     if not out:
@@ -594,7 +690,7 @@ def strict_entry_validation(data: pd.DataFrame, features: list[str], market: pd.
         development = data.iloc[:int(len(data) * (1 - final_fraction))]
         for folds in (4, 5, 6):
             rows = walk_forward(development, features, folds, args.min_train,
-                                args.horizon, args.model)
+                                args.horizon, args.model, include_research=False)
             normal = trade_metrics(simulate(
                 rows, market, args.threshold, args.horizon, args.stop_atr,
                 args.reward_risk, args.commission_bps, args.tax_bps,
@@ -833,7 +929,7 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260828.3"
+MODEL_VERSION = "20260828.4"
 STRATEGY_VERSION = "20260828.3"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -874,21 +970,22 @@ def validate_entry_gap_atr(low: float, high: float) -> None:
         raise ValueError("entry gap ATR values must be finite and satisfy low < high")
 
 
-def return_forecast_metrics(rows: pd.DataFrame) -> dict[str, float | int | bool | None]:
-    usable = rows.dropna(subset=["future_return", "predicted_return",
-                                "predicted_return_low", "predicted_return_high"])
+def return_forecast_metrics(rows: pd.DataFrame,
+                            prefix: str = "predicted_return") -> dict[str, float | int | bool | None]:
+    low_col, high_col = f"{prefix}_low", f"{prefix}_high"
+    usable = rows.dropna(subset=["future_return", prefix, low_col, high_col])
     if usable.empty:
         return {"samples": 0, "mae": None, "naive_zero_mae": None,
                 "direction_accuracy": None, "interval_80_coverage": None,
                 "checks": {}, "passed": False}
     actual = usable.future_return.to_numpy(dtype=float)
-    predicted = usable.predicted_return.to_numpy(dtype=float)
+    predicted = usable[prefix].to_numpy(dtype=float)
     mae = float(np.mean(np.abs(actual - predicted)))
     naive = float(np.mean(np.abs(actual)))
     direction = float(np.mean(np.sign(actual) == np.sign(predicted)))
     coverage = float(np.mean(
-        (actual >= usable.predicted_return_low.to_numpy(dtype=float))
-        & (actual <= usable.predicted_return_high.to_numpy(dtype=float))))
+        (actual >= usable[low_col].to_numpy(dtype=float))
+        & (actual <= usable[high_col].to_numpy(dtype=float))))
     checks = {
         "samples_at_least_30": len(usable) >= 30,
         "mae_better_than_zero_baseline": mae <= naive,
@@ -1078,7 +1175,8 @@ def main() -> int:
                           args.entry_gap_high_atr, args.minimum_predicted_return,
                           args.risk_policy)
     oos_prob, oos_tm = probability_metrics(oos, args.threshold), trade_metrics(oos_trades)
-    oos_return_forecast = return_forecast_metrics(oos)
+    trade_oos_return_forecast = return_forecast_metrics(oos)
+    oos_return_forecast = return_forecast_metrics(oos, "research_predicted_return")
     annual, regimes = grouped_metrics(oos_trades, "year"), grouped_metrics(oos_trades, "regime")
     health = strategy_health(oos_trades)
     gate = trading_gate(oos_tm, annual, health)
@@ -1091,13 +1189,17 @@ def main() -> int:
     final["probability"] = final_prob_values
     (final["predicted_return"], final["predicted_return_low"],
      final["predicted_return_high"]) = return_fit_predict(final_train, final, features)
+    (final["research_predicted_return"], final["research_predicted_return_low"],
+     final["research_predicted_return_high"], final_research_meta) = (
+        research_return_fit_predict(final_train, final, features))
     final_trades = simulate(final, primary, args.threshold, args.horizon, args.stop_atr,
                             args.reward_risk, args.commission_bps, args.tax_bps,
                             args.slippage_bps, args.entry_gap_low_atr,
                             args.entry_gap_high_atr, args.minimum_predicted_return,
                             args.risk_policy)
     final_prob, final_tm = probability_metrics(final, args.threshold), trade_metrics(final_trades)
-    final_return_forecast = return_forecast_metrics(final)
+    trade_final_return_forecast = return_forecast_metrics(final)
+    final_return_forecast = return_forecast_metrics(final, "research_predicted_return")
     required_validation = formal_validation(oos, primary, oos_tm, final_tm, args)
 
     # A quoted entry range must survive several alternative chronological cuts.
@@ -1113,6 +1215,11 @@ def main() -> int:
     latest_predicted_return = float(latest_predicted_return[0])
     latest_return_low = float(latest_return_low[0])
     latest_return_high = float(latest_return_high[0])
+    (latest_research_return, latest_research_low, latest_research_high,
+     latest_research_meta) = research_return_fit_predict(usable, latest, features)
+    latest_research_return = float(latest_research_return[0])
+    latest_research_low = float(latest_research_low[0])
+    latest_research_high = float(latest_research_high[0])
     latest_atr = float(latest.ATR.iloc[0])
     latest_close = float(latest.Close.iloc[0])
     if not all(np.isfinite(value) for value in (latest_probability, latest_atr, latest_close)):
@@ -1162,10 +1269,12 @@ def main() -> int:
         str(latest_row.get("regime", "unknown")), args.risk_policy)
     forecast_validation_passed = bool(
         oos_return_forecast["passed"] and final_return_forecast["passed"])
+    trade_forecast_validation_passed = bool(
+        trade_oos_return_forecast["passed"] and trade_final_return_forecast["passed"])
     return_signal = latest_predicted_return >= args.minimum_predicted_return
     executable = bool(latest_signal and latest_position_fraction > 0 and return_signal
                       and formal_passed and gate["passed"]
-                      and strict_passed and forecast_validation_passed)
+                      and strict_passed and trade_forecast_validation_passed)
     candidate_low = latest_close + args.entry_gap_low_atr * latest_atr
     candidate_high = latest_close + args.entry_gap_high_atr * latest_atr
     candidate_entry = (candidate_low + candidate_high) / 2
@@ -1192,7 +1301,7 @@ def main() -> int:
         "valid_until": valid_until,
     }
     price_forecast = research_price_forecast(
-        latest_close, latest_predicted_return, latest_return_low, latest_return_high,
+        latest_close, latest_research_return, latest_research_low, latest_research_high,
         args.horizon, valid_until, oos_return_forecast, final_return_forecast)
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
@@ -1225,7 +1334,15 @@ def main() -> int:
                                "parameters": CANDIDATE_20260819_3,
                                "risk_policy": RISK_POLICY_20260828_2,
                                "return_signal": return_signal,
+                               "trading_return_forecast_validation_passed":
+                                   trade_forecast_validation_passed,
                                "activated": executable},
+        "research_price_model": {
+            "candidates": list(RESEARCH_RETURN_CANDIDATES),
+            "latest_selection": latest_research_meta,
+            "final_selection": final_research_meta,
+            "affects_trading_strategy": False,
+        },
         "context_used": list(contexts), "context_skipped": skipped,
         "context_alignment": {
             symbol: {"overlap_rows": int(ctx.index.intersection(primary.index).size),
@@ -1243,6 +1360,11 @@ def main() -> int:
         "return_forecast_validation": {"development_oos": oos_return_forecast,
                                        "independent_oos": final_return_forecast,
                                        "passed": forecast_validation_passed},
+        "trading_return_forecast_validation": {
+            "development_oos": trade_oos_return_forecast,
+            "independent_oos": trade_final_return_forecast,
+            "passed": trade_forecast_validation_passed,
+        },
         "validated_score": validated_score(oos_prob, oos_tm, annual, regimes),
         "final_test_probability": final_prob, "final_test_trading": final_tm,
         "costs_bps": {"commission_each_side": args.commission_bps,
