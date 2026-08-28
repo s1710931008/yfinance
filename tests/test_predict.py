@@ -115,6 +115,29 @@ def test_risk_policy_blocks_bear_high_vol_trade():
                                 risk_policy=True)
 
 
+def test_research_price_forecast_is_independent_of_trading_gate():
+    passed = {"passed": True, "mae": .03, "direction_accuracy": .55,
+              "interval_80_coverage": .80}
+    forecast = predict.research_price_forecast(
+        100, .05, -.02, .10, 5, "2026-09-04", passed, passed)
+    assert forecast["available"]
+    assert forecast["predicted_price"] == 105
+    assert forecast["predicted_price_low"] == 98
+    assert np.isclose(forecast["predicted_price_high"], 110)
+
+
+def test_research_price_forecast_hides_prices_when_validation_fails():
+    passed = {"passed": True}
+    failed = {"passed": False}
+    forecast = predict.research_price_forecast(
+        100, .05, -.02, .10, 5, "2026-09-04", passed, failed)
+    assert not forecast["available"]
+    assert forecast["predicted_price"] is None
+    assert forecast["predicted_price_low"] is None
+    assert forecast["predicted_price_high"] is None
+    assert "價格模型自身驗證未通過" in forecast["unavailable_reason"]
+
+
 def test_same_bar_stop_and_target_is_conservative():
     market = market_frame()
     market.loc[market.index[1], ["High", "Low"]] = [104, 97]

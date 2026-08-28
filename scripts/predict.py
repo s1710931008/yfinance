@@ -833,8 +833,8 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260828.2"
-STRATEGY_VERSION = "20260828.2"
+MODEL_VERSION = "20260828.3"
+STRATEGY_VERSION = "20260828.3"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
@@ -898,6 +898,35 @@ def return_forecast_metrics(rows: pd.DataFrame) -> dict[str, float | int | bool 
     return {"samples": len(usable), "mae": mae, "naive_zero_mae": naive,
             "direction_accuracy": direction, "interval_80_coverage": coverage,
             "checks": checks, "passed": all(checks.values())}
+
+
+def research_price_forecast(latest_close: float, predicted_return: float,
+                            return_low: float, return_high: float,
+                            horizon: int, valid_until: str,
+                            development_metrics: dict,
+                            independent_metrics: dict) -> dict[str, object]:
+    """Expose research prices only when both return-model validations pass."""
+    validation_passed = bool(
+        development_metrics.get("passed") and independent_metrics.get("passed"))
+    finite_inputs = all(np.isfinite(value) for value in (
+        latest_close, predicted_return, return_low, return_high))
+    available = bool(validation_passed and finite_inputs and return_low <= return_high)
+    return {
+        "available": available,
+        "research_only": True,
+        "not_trading_advice": True,
+        "horizon_trading_days": horizon,
+        "valid_until": valid_until,
+        "predicted_price": latest_close * (1 + predicted_return) if available else None,
+        "predicted_price_low": latest_close * (1 + return_low) if available else None,
+        "predicted_price_high": latest_close * (1 + return_high) if available else None,
+        "predicted_return": predicted_return if available else None,
+        "development_oos": development_metrics,
+        "independent_oos": independent_metrics,
+        "validation_passed": validation_passed,
+        "unavailable_reason": (None if available else
+                               "價格模型自身驗證未通過，不顯示中央預測價格或區間"),
+    }
 
 
 def record_prediction(database: str, result: dict, latest: pd.Series,
@@ -1162,17 +1191,9 @@ def main() -> int:
         "invalidation": "任一驗證失敗、開盤超出區間、大盤轉空或跌破停損",
         "valid_until": valid_until,
     }
-    price_forecast = {
-        "available": executable,
-        "horizon_trading_days": args.horizon,
-        "predicted_price": latest_close * (1 + latest_predicted_return) if executable else None,
-        "predicted_price_low": latest_close * (1 + latest_return_low) if executable else None,
-        "predicted_price_high": latest_close * (1 + latest_return_high) if executable else None,
-        "predicted_return": latest_predicted_return if executable else None,
-        "validation_passed": forecast_validation_passed,
-        "unavailable_reason": (None if executable else
-                               "候選價格模型或交易策略未通過全部驗證，不提供預測價"),
-    }
+    price_forecast = research_price_forecast(
+        latest_close, latest_predicted_return, latest_return_low, latest_return_high,
+        args.horizon, valid_until, oos_return_forecast, final_return_forecast)
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
         "model_version": (MODEL_VERSION if args.model == "extra-trees" else
@@ -1293,6 +1314,22 @@ def main() -> int:
           f"PF {fmt(strict_summary['double_cost_median_profit_factor'])}")
     entry_plan = result["entry_plan"]
     print(f"最新收盤參考價：{latest_close:.2f}（不是預測價）")
+    forecast = result["price_forecast"]
+    dev_forecast = forecast["development_oos"]
+    final_forecast = forecast["independent_oos"]
+    if forecast["available"]:
+        print(f"5 日研究中央預測價格：{forecast['predicted_price']:.2f}；"
+              f"80% 區間：{forecast['predicted_price_low']:.2f}～"
+              f"{forecast['predicted_price_high']:.2f}；期限：{forecast['valid_until']}")
+        print("研究價格預測不是建議買進價，不得單獨作為交易依據")
+    else:
+        print(f"5 日研究價格預測：未產生；原因：{forecast['unavailable_reason']}")
+    print(f"價格模型開發期：MAE {pct(dev_forecast['mae'])}；方向準確率 "
+          f"{pct(dev_forecast['direction_accuracy'])}；80% 區間覆蓋率 "
+          f"{pct(dev_forecast['interval_80_coverage'])}")
+    print(f"價格模型保留期：MAE {pct(final_forecast['mae'])}；方向準確率 "
+          f"{pct(final_forecast['direction_accuracy'])}；80% 區間覆蓋率 "
+          f"{pct(final_forecast['interval_80_coverage'])}")
     if result["signal"]:
         print(f"歷史回測較穩健的下一交易日買進區間：{entry_plan['acceptable_low']:.2f}～"
               f"{entry_plan['acceptable_high']:.2f}")
