@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss
 from sklearn.pipeline import Pipeline
@@ -286,9 +286,15 @@ def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
 
     # Labels are for modelling only. All values used here occur after the signal bar.
     future_close = d.Close.shift(-horizon) / d.Close - 1
+    future_highs = pd.concat(
+        [d.High.shift(-i) / d.Close - 1 for i in range(1, horizon + 1)], axis=1).max(axis=1)
     future_lows = pd.concat([d.Low.shift(-i) / d.Close - 1 for i in range(1, horizon + 1)], axis=1).min(axis=1)
+    d["future_return"] = future_close
+    d["future_high_return"] = future_highs
+    d["future_low_return"] = future_lows
     d["label"] = ((future_close >= target) & (future_lows >= adverse)).astype(float)
-    d.loc[d.index[-horizon:], "label"] = np.nan
+    d.loc[d.index[-horizon:], ["label", "future_return", "future_high_return",
+                              "future_low_return"]] = np.nan
     d["regime"] = np.select(
         [d.trend_20_60 >= 0, d.trend_20_60 < 0], ["bull", "bear"], default="unknown")
     high_vol = d.vol_20 > d.vol_20.rolling(252, min_periods=60).median()
@@ -331,6 +337,25 @@ def calibrated_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
     return prob, base, calibrator
 
 
+def return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
+                       features: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Fit only on known forward returns and return median/10th/90th percentiles."""
+    fit = train.dropna(subset=["future_return"])
+    if len(fit) < 50:
+        raise RuntimeError("insufficient known returns for price model")
+    imputer = SimpleImputer(strategy="median")
+    x_train = imputer.fit_transform(fit[features])
+    x_test = imputer.transform(test[features])
+    regressor = ExtraTreesRegressor(
+        n_estimators=300, min_samples_leaf=12, max_features=0.7,
+        random_state=43, n_jobs=-1)
+    regressor.fit(x_train, fit.future_return)
+    tree_predictions = np.vstack([tree.predict(x_test) for tree in regressor.estimators_])
+    return (np.quantile(tree_predictions, 0.50, axis=0),
+            np.quantile(tree_predictions, 0.10, axis=0),
+            np.quantile(tree_predictions, 0.90, axis=0))
+
+
 def walk_forward(dev: pd.DataFrame, features: list[str], folds: int,
                  min_train: int, purge: int = 0,
                  model_kind: str = "logistic") -> pd.DataFrame:
@@ -345,6 +370,8 @@ def walk_forward(dev: pd.DataFrame, features: list[str], folds: int,
             continue
         test["probability"], _, _ = calibrated_fit_predict(
             train, test, features, purge, model_kind)
+        (test["predicted_return"], test["predicted_return_low"],
+         test["predicted_return_high"]) = return_fit_predict(train, test, features)
         test["fold"] = fold + 1
         out.append(test)
     if not out:
@@ -364,13 +391,19 @@ def simulate(rows: pd.DataFrame, market: pd.DataFrame, threshold: float, horizon
              stop_atr: float, reward_risk: float, commission_bps: float,
              tax_bps: float, slippage_bps: float,
              entry_gap_low_atr: float | None = None,
-             entry_gap_high_atr: float | None = None) -> list[Trade]:
+             entry_gap_high_atr: float | None = None,
+             minimum_predicted_return: float | None = None) -> list[Trade]:
     loc = {date: i for i, date in enumerate(market.index)}
     trades: list[Trade] = []
     blocked_until = -1
     for signal_date, row in rows.iterrows():
         i = loc.get(signal_date)
         if i is None or i < blocked_until or row.probability < threshold or i + 1 >= len(market):
+            continue
+        if (minimum_predicted_return is not None
+                and ("predicted_return" not in row
+                     or not np.isfinite(row.predicted_return)
+                     or row.predicted_return < minimum_predicted_return)):
             continue
         entry_i = i + 1
         if entry_gap_low_atr is not None and entry_gap_high_atr is not None:
@@ -500,7 +533,8 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
         metrics = trade_metrics(simulate(
             rows, market, args.threshold, args.horizon, args.stop_atr,
             args.reward_risk, args.commission_bps, args.tax_bps,
-            args.slippage_bps, args.entry_gap_low_atr, args.entry_gap_high_atr))
+            args.slippage_bps, args.entry_gap_low_atr, args.entry_gap_high_atr,
+            getattr(args, "minimum_predicted_return", None)))
         fold_metrics.append({"fold": int(fold), **metrics})
     fold_win_rates = [m["win_rate"] for m in fold_metrics if m["win_rate"] is not None]
     all_folds_have_trades = (len(fold_metrics) >= 2
@@ -554,12 +588,14 @@ def strict_entry_validation(data: pd.DataFrame, features: list[str], market: pd.
                 rows, market, args.threshold, args.horizon, args.stop_atr,
                 args.reward_risk, args.commission_bps, args.tax_bps,
                 args.slippage_bps, args.entry_gap_low_atr,
-                args.entry_gap_high_atr))
+                args.entry_gap_high_atr,
+                getattr(args, "minimum_predicted_return", None)))
             stressed = trade_metrics(simulate(
                 rows, market, args.threshold, args.horizon, args.stop_atr,
                 args.reward_risk, args.commission_bps * 2, args.tax_bps * 2,
                 args.slippage_bps * 2, args.entry_gap_low_atr,
-                args.entry_gap_high_atr))
+                args.entry_gap_high_atr,
+                getattr(args, "minimum_predicted_return", None)))
             runs.append({"final_fraction": final_fraction, "folds": folds,
                          "normal_cost": normal, "double_cost": stressed})
 
@@ -784,9 +820,45 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260819.2"
-STRATEGY_VERSION = "20260819.2"
+MODEL_VERSION = "20260819.3"
+STRATEGY_VERSION = "20260819.3"
 TAIPEI = ZoneInfo("Asia/Taipei")
+
+CANDIDATE_20260819_3 = {
+    "threshold": 0.15,
+    "entry_gap_low_atr": -0.25,
+    "entry_gap_high_atr": 0.25,
+    "stop_atr": 1.5,
+    "reward_risk": 2.5,
+    "minimum_predicted_return": 0.005,
+    "selection_scope": "最後15%獨立期間之前的預先限制候選集合",
+}
+
+
+def return_forecast_metrics(rows: pd.DataFrame) -> dict[str, float | int | bool | None]:
+    usable = rows.dropna(subset=["future_return", "predicted_return",
+                                "predicted_return_low", "predicted_return_high"])
+    if usable.empty:
+        return {"samples": 0, "mae": None, "naive_zero_mae": None,
+                "direction_accuracy": None, "interval_80_coverage": None,
+                "checks": {}, "passed": False}
+    actual = usable.future_return.to_numpy(dtype=float)
+    predicted = usable.predicted_return.to_numpy(dtype=float)
+    mae = float(np.mean(np.abs(actual - predicted)))
+    naive = float(np.mean(np.abs(actual)))
+    direction = float(np.mean(np.sign(actual) == np.sign(predicted)))
+    coverage = float(np.mean(
+        (actual >= usable.predicted_return_low.to_numpy(dtype=float))
+        & (actual <= usable.predicted_return_high.to_numpy(dtype=float))))
+    checks = {
+        "samples_at_least_30": len(usable) >= 30,
+        "mae_better_than_zero_baseline": mae <= naive,
+        "direction_accuracy_at_least_52pct": direction >= 0.52,
+        "interval_coverage_between_60_and_95pct": 0.60 <= coverage <= 0.95,
+    }
+    return {"samples": len(usable), "mae": mae, "naive_zero_mae": naive,
+            "direction_accuracy": direction, "interval_80_coverage": coverage,
+            "checks": checks, "passed": all(checks.values())}
 
 
 def record_prediction(database: str, result: dict, latest: pd.Series,
@@ -860,6 +932,8 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
         "validation_snapshot": result["validation_snapshot"],
         "data_source_snapshot": result["data_source_snapshot"],
         "execution_plan": result["execution_plan"],
+        "price_forecast": result.get("price_forecast"),
+        "return_forecast_validation": result.get("return_forecast_validation"),
     }
     action = result["action"]
     reason = ("正式驗證、訊號、交易閘門與嚴格進場驗證全部通過" if signal else
@@ -900,6 +974,10 @@ def main() -> int:
     args = parse_args()
     if args.threshold is None:
         args.threshold = 0.22 if args.model == "extra-trees" else 0.70
+    if args.model == "extra-trees" and args.feature_set == "all":
+        for name, value in CANDIDATE_20260819_3.items():
+            if name != "selection_scope":
+                setattr(args, name, value)
     if not 0.10 <= args.final_test <= 0.40:
         raise SystemExit("--final-test must be between 0.10 and 0.40")
     if args.horizon < 1 or args.folds < 2 or not 0 < args.threshold < 1:
@@ -924,8 +1002,9 @@ def main() -> int:
     oos_trades = simulate(oos, primary, args.threshold, args.horizon, args.stop_atr,
                           args.reward_risk, args.commission_bps, args.tax_bps,
                           args.slippage_bps, args.entry_gap_low_atr,
-                          args.entry_gap_high_atr)
+                          args.entry_gap_high_atr, args.minimum_predicted_return)
     oos_prob, oos_tm = probability_metrics(oos, args.threshold), trade_metrics(oos_trades)
+    oos_return_forecast = return_forecast_metrics(oos)
     annual, regimes = grouped_metrics(oos_trades, "year"), grouped_metrics(oos_trades, "regime")
     health = strategy_health(oos_trades)
     gate = trading_gate(oos_tm, annual, health)
@@ -936,11 +1015,14 @@ def main() -> int:
         final_train, final, features, args.horizon, args.model)
     final = final.copy()
     final["probability"] = final_prob_values
+    (final["predicted_return"], final["predicted_return_low"],
+     final["predicted_return_high"]) = return_fit_predict(final_train, final, features)
     final_trades = simulate(final, primary, args.threshold, args.horizon, args.stop_atr,
                             args.reward_risk, args.commission_bps, args.tax_bps,
                             args.slippage_bps, args.entry_gap_low_atr,
-                            args.entry_gap_high_atr)
+                            args.entry_gap_high_atr, args.minimum_predicted_return)
     final_prob, final_tm = probability_metrics(final, args.threshold), trade_metrics(final_trades)
+    final_return_forecast = return_forecast_metrics(final)
     required_validation = formal_validation(oos, primary, oos_tm, final_tm, args)
 
     # A quoted entry range must survive several alternative chronological cuts.
@@ -951,6 +1033,11 @@ def main() -> int:
     latest = data.iloc[[-1]].copy()
     latest_probability = float(calibrated_fit_predict(
         usable, latest, features, args.horizon, args.model)[0][0])
+    latest_predicted_return, latest_return_low, latest_return_high = return_fit_predict(
+        usable, latest, features)
+    latest_predicted_return = float(latest_predicted_return[0])
+    latest_return_low = float(latest_return_low[0])
+    latest_return_high = float(latest_return_high[0])
     latest_atr = float(latest.ATR.iloc[0])
     latest_close = float(latest.Close.iloc[0])
     if not all(np.isfinite(value) for value in (latest_probability, latest_atr, latest_close)):
@@ -996,7 +1083,11 @@ def main() -> int:
     formal_passed = bool(required_validation["passed"])
     strict_passed = bool(strict_entry["passed"])
     latest_signal = bool(latest_probability >= args.threshold)
-    executable = bool(latest_signal and formal_passed and gate["passed"] and strict_passed)
+    forecast_validation_passed = bool(
+        oos_return_forecast["passed"] and final_return_forecast["passed"])
+    return_signal = latest_predicted_return >= args.minimum_predicted_return
+    executable = bool(latest_signal and return_signal and formal_passed and gate["passed"]
+                      and strict_passed and forecast_validation_passed)
     candidate_low = latest_close + args.entry_gap_low_atr * latest_atr
     candidate_high = latest_close + args.entry_gap_high_atr * latest_atr
     candidate_entry = (candidate_low + candidate_high) / 2
@@ -1018,6 +1109,17 @@ def main() -> int:
         "condition": "正式驗證、機率、交易閘門、多重驗證及下一交易日開盤區間全部通過",
         "invalidation": "任一驗證失敗、開盤超出區間、大盤轉空或跌破停損",
         "valid_until": valid_until,
+    }
+    price_forecast = {
+        "available": executable,
+        "horizon_trading_days": args.horizon,
+        "predicted_price": latest_close * (1 + latest_predicted_return) if executable else None,
+        "predicted_price_low": latest_close * (1 + latest_return_low) if executable else None,
+        "predicted_price_high": latest_close * (1 + latest_return_high) if executable else None,
+        "predicted_return": latest_predicted_return if executable else None,
+        "validation_passed": forecast_validation_passed,
+        "unavailable_reason": (None if executable else
+                               "候選價格模型或交易策略未通過全部驗證，不提供預測價"),
     }
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
@@ -1045,6 +1147,11 @@ def main() -> int:
                        "final_test_confirmation": final_tm,
                        "next_open_known": False},
         "execution_plan": execution_plan,
+        "price_forecast": price_forecast,
+        "candidate_strategy": {"version": "20260819.3",
+                               "parameters": CANDIDATE_20260819_3,
+                               "return_signal": return_signal,
+                               "activated": executable},
         "context_used": list(contexts), "context_skipped": skipped,
         "context_alignment": {
             symbol: {"overlap_rows": int(ctx.index.intersection(primary.index).size),
@@ -1059,6 +1166,9 @@ def main() -> int:
         "strategy_health": health, "trading_gate": gate,
         "validation_snapshot": required_validation,
         "strict_entry_validation": strict_entry,
+        "return_forecast_validation": {"development_oos": oos_return_forecast,
+                                       "independent_oos": final_return_forecast,
+                                       "passed": forecast_validation_passed},
         "validated_score": validated_score(oos_prob, oos_tm, annual, regimes),
         "final_test_probability": final_prob, "final_test_trading": final_tm,
         "costs_bps": {"commission_each_side": args.commission_bps,
