@@ -14,21 +14,24 @@ SPEC.loader.exec_module(export_history)
 def make_database(path):
     with sqlite3.connect(path) as con:
         con.execute("""CREATE TABLE predictions (
-            id INTEGER PRIMARY KEY, predicted_at TEXT, market_date TEXT,
-            market_price REAL, action TEXT, model_probability REAL,
-            valid_until TEXT, model_version TEXT, strategy_version TEXT,
-            suggested_entry REAL, entry_low REAL, entry_high REAL,
-            stop_price REAL, take_profit_1 REAL, take_profit_2 REAL,
-            actual_close REAL, actual_return REAL, prediction_success INTEGER,
-            settled_at TEXT)""")
-        con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
-            (1, "2026-08-18T16:30:00+08:00", "2026-08-18", 34.81, "不交易", .33,
+            id INTEGER PRIMARY KEY, predicted_at TEXT, market_price REAL,
+            action TEXT, model_probability REAL, valid_until TEXT,
+            model_version TEXT, strategy_version TEXT, buy_price REAL,
+            buy_range_low REAL, buy_range_high REAL, stop_loss REAL,
+            take_profit_1 REAL, take_profit_2 REAL, data_source_snapshot TEXT)""")
+        con.execute("""CREATE TABLE prediction_outcomes (
+            id INTEGER PRIMARY KEY, prediction_id INTEGER, actual_close REAL,
+            actual_return_pct REAL, prediction_success INTEGER, resolved_at TEXT)""")
+        con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
+            (1, "2026-08-18T16:30:00+08:00", 34.81, "不交易", .33,
              "2026-08-25", "m1", "s1", None, None, None, None, None, None,
-             36.0, .03, 1, "2026-08-25T16:30:00+08:00"),
-            (2, "2026-08-19T16:30:00+08:00", "2026-08-19", 35.0, "買進", .72,
+             '{"market_date":"2026-08-18"}'),
+            (2, "2026-08-19T16:30:00+08:00", 35.0, "買進", .72,
              "2026-08-26", "m2", "s2", 35.2, 35.0, 35.4, 34.0, 36.4, 37.6,
-             None, None, None, None),
+             '{"market_date":"2026-08-19"}'),
         ])
+        con.execute("INSERT INTO prediction_outcomes VALUES (?,?,?,?,?,?)",
+                    (1, 1, 36.0, .03, None, "2026-08-25T16:30:00+08:00"))
 
 
 def test_export_history_is_sanitized_and_newest_first(tmp_path):

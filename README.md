@@ -332,8 +332,10 @@ EV 仍為正、PF 至少 1.10，才會顯示建議買進區間。任何一項未
 
 每次正式執行會把當次預測新增至 `predictions.sqlite3`，包含行情、動作、建議區間、
 停損、兩段停利、模型機率、回測勝率、有效期限、版本、技術指標、理由及市場狀態。
-原始預測欄位不會被覆蓋；同一天重新執行也會新增一筆。程式執行時會為已到期紀錄
-補寫實際最高／最低／收盤、停損停利觸發、報酬與結果。純研究比較可加
+原始預測保存在不可更新、不可刪除的 `predictions` 表；同一天重新執行也會新增一筆。
+程式執行時會把已到期結果新增至獨立的 `prediction_outcomes` 表，不會回寫原始預測。
+舊版資料庫首次執行時會先建立含時間戳的 `.legacy-*.bak` 備份，再以單一 transaction
+遷移；純研究比較可加
 `--no-record`，避免把實驗結果寫入正式歷史。
 
 ### 要累積多久才有資料
@@ -366,14 +368,15 @@ cd /Users/hongzhenghong/Desktop/yfinance
 ```bash
 sqlite3 -header -column predictions.sqlite3 "
 SELECT
-  id,
-  market_date AS 日期,
-  action AS 建議,
-  ROUND(model_probability * 100, 1) || '%' AS 模型機率,
-  ROUND(backtest_win_rate * 100, 1) || '%' AS 回測勝率,
-  trade_result AS 實際結果
-FROM predictions
-ORDER BY id DESC
+  p.id,
+  json_extract(p.data_source_snapshot, '$.market_date') AS 日期,
+  p.action AS 建議,
+  ROUND(p.model_probability * 100, 1) || '%' AS 模型機率,
+  ROUND(p.backtest_winrate * 100, 1) || '%' AS 回測勝率,
+  COALESCE(o.trade_result, '尚未到期') AS 實際結果
+FROM predictions AS p
+LEFT JOIN prediction_outcomes AS o ON o.prediction_id = p.id
+ORDER BY p.id DESC
 LIMIT 20;
 "
 ```
@@ -383,17 +386,17 @@ LIMIT 20;
 ```bash
 sqlite3 -header -column predictions.sqlite3 "
 SELECT
-  market_date AS 預測日期,
-  action AS 建議,
-  actual_high AS 最高價,
-  actual_low AS 最低價,
-  actual_close AS 到期收盤,
-  ROUND(actual_return * 100, 2) || '%' AS 實際報酬,
-  trade_result AS 結果,
-  prediction_success AS 是否成功
-FROM predictions
-WHERE settled_at IS NOT NULL
-ORDER BY market_date DESC;
+  json_extract(p.data_source_snapshot, '$.market_date') AS 預測日期,
+  p.action AS 建議,
+  o.actual_high AS 最高價,
+  o.actual_low AS 最低價,
+  o.actual_close AS 到期收盤,
+  ROUND(o.actual_return_pct * 100, 2) || '%' AS 實際報酬,
+  o.trade_result AS 結果,
+  o.prediction_success AS 是否成功
+FROM predictions AS p
+JOIN prediction_outcomes AS o ON o.prediction_id = p.id
+ORDER BY 預測日期 DESC;
 "
 ```
 

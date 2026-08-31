@@ -11,6 +11,7 @@ import argparse
 import datetime as dt
 import json
 import math
+from pathlib import Path
 import sqlite3
 import sys
 import urllib.parse
@@ -931,6 +932,7 @@ def clean_json(value):
 
 MODEL_VERSION = "20260828.4"
 STRATEGY_VERSION = "20260828.3"
+DATABASE_SCHEMA_VERSION = "20260831.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
@@ -1026,100 +1028,254 @@ def research_price_forecast(latest_close: float, predicted_return: float,
     }
 
 
+def _create_prediction_schema(con: sqlite3.Connection) -> None:
+    # Keep every DDL statement inside the caller's explicit transaction.
+    # sqlite3.Connection.executescript() commits a pending transaction first.
+    statements = (
+        """CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            predicted_at TEXT NOT NULL,
+            timezone TEXT NOT NULL DEFAULT 'Asia/Taipei',
+            symbol TEXT NOT NULL CHECK(symbol = '00631L'),
+            market_price REAL NOT NULL,
+            action TEXT NOT NULL CHECK(action IN ('買進','持有','賣出','不交易')),
+            buy_price REAL, buy_range_low REAL, buy_range_high REAL,
+            position_sizing TEXT, stop_loss REAL, take_profit_1 REAL,
+            take_profit_2 REAL, risk_reward_ratio REAL,
+            model_probability REAL, backtest_winrate REAL,
+            valid_until TEXT NOT NULL, model_version TEXT NOT NULL,
+            strategy_version TEXT NOT NULL, indicators_snapshot TEXT,
+            validation_snapshot TEXT, data_source_snapshot TEXT,
+            reasoning TEXT,
+            market_state TEXT CHECK(market_state IN ('多頭','空頭','盤整')),
+            created_at TEXT NOT NULL DEFAULT (
+                strftime('%Y-%m-%dT%H:%M:%S', 'now', '+8 hours') || '+08:00'
+            ),
+            CHECK(model_probability IS NULL OR model_probability BETWEEN 0 AND 1),
+            CHECK(backtest_winrate IS NULL OR backtest_winrate BETWEEN 0 AND 1),
+            CHECK(buy_range_low IS NULL OR buy_range_high IS NULL OR buy_range_low <= buy_range_high)
+        )""",
+        """CREATE TABLE IF NOT EXISTS prediction_outcomes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prediction_id INTEGER NOT NULL REFERENCES predictions(id),
+            actual_high REAL, actual_low REAL, actual_close REAL,
+            hit_stop_loss INTEGER CHECK(hit_stop_loss IN (0,1)),
+            hit_take_profit_1 INTEGER CHECK(hit_take_profit_1 IN (0,1)),
+            hit_take_profit_2 INTEGER CHECK(hit_take_profit_2 IN (0,1)),
+            actual_return_pct REAL, trade_result TEXT,
+            prediction_success INTEGER CHECK(prediction_success IN (0,1)),
+            resolved_at TEXT NOT NULL, UNIQUE(prediction_id)
+        )""",
+        """CREATE TRIGGER IF NOT EXISTS prevent_prediction_update
+        BEFORE UPDATE ON predictions BEGIN
+            SELECT RAISE(ABORT, '原始預測紀錄不得修改，請新增一筆紀錄');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS prevent_prediction_delete
+        BEFORE DELETE ON predictions BEGIN
+            SELECT RAISE(ABORT, '原始預測紀錄不得刪除');
+        END""",
+    )
+    for statement in statements:
+        con.execute(statement)
+
+
+def _market_state_zh(regime: object) -> str:
+    value = str(regime or "")
+    if value.startswith("bull"):
+        return "多頭"
+    if value.startswith("bear"):
+        return "空頭"
+    return "盤整"
+
+
+def _ensure_taipei_iso(value: object) -> str:
+    stamp = pd.Timestamp(value)
+    if stamp.tzinfo is None:
+        stamp = stamp.tz_localize(TAIPEI)
+    else:
+        stamp = stamp.tz_convert(TAIPEI)
+    return stamp.isoformat()
+
+
+def _migrate_legacy_database(database: str) -> str | None:
+    """Preserve a timestamped byte-for-byte backup, then migrate the legacy table."""
+    path = Path(database)
+    if not path.exists():
+        return None
+    with sqlite3.connect(path) as check:
+        tables = {row[0] for row in check.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        if "predictions" not in tables:
+            return None
+        columns = {row[1] for row in check.execute("PRAGMA table_info(predictions)")}
+        if "symbol" in columns and "data_source_snapshot" in columns:
+            return None
+        if not {"ticker", "market_date"} <= columns:
+            raise RuntimeError("unknown predictions schema; automatic migration refused")
+    timestamp = dt.datetime.now(TAIPEI).strftime("%Y%m%dT%H%M%S%z")
+    backup = path.with_name(f"{path.name}.legacy-{timestamp}.bak")
+    # SQLite's backup API includes committed WAL pages and creates a consistent
+    # snapshot; copying only the main file can silently omit recent commits.
+    with sqlite3.connect(path) as source, sqlite3.connect(backup) as destination:
+        source.backup(destination)
+    with sqlite3.connect(path) as con:
+        con.execute("PRAGMA foreign_keys = ON")
+        con.execute("PRAGMA busy_timeout = 5000")
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.execute("ALTER TABLE predictions RENAME TO predictions_legacy_20260831_1")
+            _create_prediction_schema(con)
+            con.row_factory = sqlite3.Row
+            rows = con.execute("SELECT * FROM predictions_legacy_20260831_1 ORDER BY id").fetchall()
+            for row in rows:
+                market_state = _market_state_zh(row["market_regime"])
+                source = {"market_date": row["market_date"], "timezone": "Asia/Taipei",
+                          "migration": "legacy-20260831.1", "source": "legacy snapshot"}
+                validation = {"migration": "legacy validation snapshot unavailable",
+                              "backtest_winrate": row["backtest_win_rate"]}
+                con.execute("""INSERT INTO predictions (
+                    id,predicted_at,timezone,symbol,market_price,action,buy_price,
+                    buy_range_low,buy_range_high,stop_loss,take_profit_1,take_profit_2,
+                    risk_reward_ratio,model_probability,backtest_winrate,valid_until,
+                    model_version,strategy_version,indicators_snapshot,
+                    validation_snapshot,data_source_snapshot,reasoning,market_state,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (row["id"], _ensure_taipei_iso(row["predicted_at"]), "Asia/Taipei",
+                     "00631L", row["market_price"], row["action"], row["suggested_entry"],
+                     row["entry_low"], row["entry_high"], row["stop_price"],
+                     row["take_profit_1"], row["take_profit_2"], None,
+                     row["model_probability"], row["backtest_win_rate"], row["valid_until"],
+                     row["model_version"], row["strategy_version"], row["indicators_json"],
+                     json.dumps(validation, ensure_ascii=False),
+                     json.dumps(source, ensure_ascii=False), row["reason"], market_state,
+                     _ensure_taipei_iso(row["predicted_at"])))
+                if row["settled_at"] is not None:
+                    con.execute("""INSERT INTO prediction_outcomes (
+                        prediction_id,actual_high,actual_low,actual_close,hit_stop_loss,
+                        hit_take_profit_1,hit_take_profit_2,actual_return_pct,trade_result,
+                        prediction_success,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                        (row["id"], row["actual_high"], row["actual_low"], row["actual_close"],
+                         row["stop_touched"], row["target1_touched"], row["target2_touched"],
+                         row["actual_return"], row["trade_result"], row["prediction_success"],
+                         _ensure_taipei_iso(row["settled_at"])))
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+    return str(backup)
+
+
+def _settle_expired_predictions(con: sqlite3.Connection, market: pd.DataFrame,
+                                latest_date: pd.Timestamp) -> int:
+    con.row_factory = sqlite3.Row
+    pending = con.execute("""SELECT p.* FROM predictions p
+        LEFT JOIN prediction_outcomes o ON o.prediction_id=p.id
+        WHERE o.id IS NULL AND p.valid_until<=?""", (str(latest_date.date()),)).fetchall()
+    settled = 0
+    for row in pending:
+        try:
+            source = json.loads(row["data_source_snapshot"] or "{}")
+        except json.JSONDecodeError:
+            source = {}
+        market_date = source.get("market_date")
+        if not market_date:
+            continue
+        bars = market.loc[(market.index > pd.Timestamp(market_date)) &
+                          (market.index <= pd.Timestamp(row["valid_until"]))]
+        if bars.empty:
+            continue
+        high, low, close = float(bars.High.max()), float(bars.Low.min()), float(bars.Close.iloc[-1])
+        stop_hit = target1_hit = target2_hit = False
+        ambiguous = False
+        for _, bar in bars.iterrows():
+            day_stop = row["stop_loss"] is not None and float(bar.Low) <= row["stop_loss"]
+            day_t1 = row["take_profit_1"] is not None and float(bar.High) >= row["take_profit_1"]
+            day_t2 = row["take_profit_2"] is not None and float(bar.High) >= row["take_profit_2"]
+            if day_stop and (day_t1 or day_t2):
+                stop_hit, target1_hit, target2_hit, ambiguous = True, day_t1, day_t2, True
+                break
+            stop_hit, target1_hit, target2_hit = stop_hit or day_stop, target1_hit or day_t1, target2_hit or day_t2
+            if day_stop or day_t2:
+                break
+        basis = row["buy_price"] if row["buy_price"] is not None else row["market_price"]
+        actual_return = close / basis - 1 if basis else None
+        if row["action"] == "不交易":
+            result_text, success = "不交易到期", None
+        elif ambiguous:
+            result_text, success = "停損停利順序無法判定（保守視為失敗）", 0
+        elif stop_hit:
+            result_text, success = "停損", 0
+        elif target2_hit:
+            result_text, success = "第二停利", 1
+        elif target1_hit:
+            result_text, success = "第一停利", 1
+        else:
+            result_text, success = "到期", int(actual_return is not None and actual_return > 0)
+        con.execute("""INSERT INTO prediction_outcomes (
+            prediction_id,actual_high,actual_low,actual_close,hit_stop_loss,
+            hit_take_profit_1,hit_take_profit_2,actual_return_pct,trade_result,
+            prediction_success,resolved_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (row["id"], high, low, close, int(stop_hit), int(target1_hit), int(target2_hit),
+             actual_return, result_text, success, dt.datetime.now(TAIPEI).isoformat()))
+        settled += 1
+    return settled
+
+
 def record_prediction(database: str, result: dict, latest: pd.Series,
                       market: pd.DataFrame, args: argparse.Namespace) -> int:
-    """Settle expired outcomes, then append one immutable prediction snapshot."""
+    """Append an immutable snapshot and settle outcomes in a separate table."""
     market_price = result.get("latest_price")
     if not isinstance(market_price, (int, float)) or not np.isfinite(market_price) or market_price <= 0:
         raise ValueError("market_price must be a finite positive number; prediction was not recorded")
+    _migrate_legacy_database(database)
     con = sqlite3.connect(database)
     con.execute("PRAGMA journal_mode = WAL")
     con.execute("PRAGMA foreign_keys = ON")
     con.execute("PRAGMA busy_timeout = 5000")
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS predictions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            predicted_at TEXT NOT NULL, ticker TEXT NOT NULL,
-            market_date TEXT NOT NULL, market_price REAL NOT NULL,
-            action TEXT NOT NULL, suggested_entry REAL,
-            entry_low REAL, entry_high REAL, stop_price REAL,
-            take_profit_1 REAL, take_profit_2 REAL,
-            model_probability REAL, backtest_win_rate REAL,
-            valid_until TEXT NOT NULL, model_version TEXT NOT NULL,
-            strategy_version TEXT NOT NULL, indicators_json TEXT NOT NULL,
-            reason TEXT NOT NULL, market_regime TEXT NOT NULL,
-            actual_high REAL, actual_low REAL, actual_close REAL,
-            stop_touched INTEGER, target1_touched INTEGER, target2_touched INTEGER,
-            actual_return REAL, trade_result TEXT, prediction_success INTEGER,
-            settled_at TEXT
-        )
-    """)
-    latest_date = pd.Timestamp(result["latest_date"])
-    # Outcome columns may be completed later; original prediction columns are never changed.
-    pending = con.execute(
-        "SELECT id, market_date, valid_until, market_price, stop_price, "
-        "take_profit_1, take_profit_2 FROM predictions "
-        "WHERE ticker=? AND settled_at IS NULL AND valid_until<=?",
-        (result["ticker"], str(latest_date.date()))).fetchall()
-    for row_id, market_date, valid_until, entry, stop, target1, target2 in pending:
-        bars = market.loc[(market.index > pd.Timestamp(market_date)) &
-                          (market.index <= pd.Timestamp(valid_until))]
-        if bars.empty:
-            continue
-        high, low, close = float(bars.High.max()), float(bars.Low.min()), float(bars.Close.iloc[-1])
-        stop_hit = bool(stop is not None and low <= stop)
-        target1_hit = bool(target1 is not None and high >= target1)
-        target2_hit = bool(target2 is not None and high >= target2)
-        outcome = "停損" if stop_hit else ("第二停利" if target2_hit else
-                  ("第一停利" if target1_hit else "到期"))
-        actual_return = close / entry - 1 if entry else None
-        success = int((target1_hit or (actual_return is not None and actual_return > 0)) and not stop_hit)
-        con.execute("""UPDATE predictions SET actual_high=?, actual_low=?, actual_close=?,
-                    stop_touched=?, target1_touched=?, target2_touched=?, actual_return=?,
-                    trade_result=?, prediction_success=?, settled_at=? WHERE id=?""",
-                    (high, low, close, int(stop_hit), int(target1_hit), int(target2_hit),
-                     actual_return, outcome, success, dt.datetime.now(TAIPEI).isoformat(), row_id))
-
-    plan = result["execution_plan"]
-    signal = bool(result["signal"])
-    entry = plan["suggested_entry"] if signal else None
-    stop = plan["stop"] if signal else None
-    target1 = plan["take_profit_1"] if signal else None
-    target2 = plan["take_profit_2"] if signal else None
-    valid_until = result["valid_until"]
-    indicators = {name: clean_json(float(latest[name])) for name in (
-        "rsi14", "kd_k", "kd_d", "macd", "macd_signal", "macd_hist",
-        "volume_z20", "volume_ratio_5_20", "trend_20_60", "ATR",
-        "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap"
-    ) if name in latest and pd.notna(latest[name])}
-    snapshot = {
-        "indicators": indicators,
-        "validation_snapshot": result["validation_snapshot"],
-        "data_source_snapshot": result["data_source_snapshot"],
-        "execution_plan": result["execution_plan"],
-        "price_forecast": result.get("price_forecast"),
-        "return_forecast_validation": result.get("return_forecast_validation"),
-    }
-    action = result["action"]
-    reason = ("正式驗證、訊號、交易閘門與嚴格進場驗證全部通過" if signal else
-              "正式驗證、機率、交易閘門或嚴格進場驗證未全部通過")
-    cur = con.execute("""INSERT INTO predictions (
-        predicted_at,ticker,market_date,market_price,action,suggested_entry,
-        entry_low,entry_high,stop_price,take_profit_1,take_profit_2,
-        model_probability,backtest_win_rate,valid_until,model_version,
-        strategy_version,indicators_json,reason,market_regime)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (dt.datetime.now(TAIPEI).isoformat(), result["ticker"], result["latest_date"],
-         market_price, action, entry,
-         plan["entry_low"] if signal else None, plan["entry_high"] if signal else None,
-         stop, target1, target2, result["latest_probability"],
-         result["oos_trading"]["win_rate"],
-         str(valid_until), result["model_version"], result["strategy_version"],
-         json.dumps(clean_json(snapshot), ensure_ascii=False), reason,
-         str(latest.get("regime", "unknown"))))
-    prediction_id = int(cur.lastrowid)
-    con.commit()
-    con.close()
+    try:
+        con.execute("BEGIN IMMEDIATE")
+        _create_prediction_schema(con)
+        _settle_expired_predictions(con, market, pd.Timestamp(result["latest_date"]))
+        plan, signal = result["execution_plan"], bool(result["signal"])
+        indicators = {name: clean_json(float(latest[name])) for name in (
+            "rsi14", "kd_k", "kd_d", "macd", "macd_signal", "macd_hist",
+            "volume_z20", "volume_ratio_5_20", "trend_20_60", "ATR",
+            "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap"
+        ) if name in latest and pd.notna(latest[name])}
+        source = dict(result["data_source_snapshot"])
+        source["market_date"] = result["latest_date"]
+        source["database_schema_version"] = DATABASE_SCHEMA_VERSION
+        reason = ("正式驗證、訊號、交易閘門與嚴格進場驗證全部通過" if signal else
+                  "正式驗證、機率、交易閘門或嚴格進場驗證未全部通過")
+        cur = con.execute("""INSERT INTO predictions (
+            predicted_at,timezone,symbol,market_price,action,buy_price,buy_range_low,
+            buy_range_high,position_sizing,stop_loss,take_profit_1,take_profit_2,
+            risk_reward_ratio,model_probability,backtest_winrate,valid_until,
+            model_version,strategy_version,indicators_snapshot,validation_snapshot,
+            data_source_snapshot,reasoning,market_state)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (dt.datetime.now(TAIPEI).isoformat(), "Asia/Taipei", "00631L", market_price,
+             result["action"], plan["suggested_entry"] if signal else None,
+             plan["entry_low"] if signal else None, plan["entry_high"] if signal else None,
+             json.dumps(clean_json({"tranches": plan.get("tranches", []),
+                                    "capital_denominator": plan.get("capital_denominator")}),
+                        ensure_ascii=False),
+             plan["stop"] if signal else None, plan["take_profit_1"] if signal else None,
+             plan["take_profit_2"] if signal else None,
+             plan.get("reward_risk_2") if signal else None, result["latest_probability"],
+             result["oos_trading"]["win_rate"], str(result["valid_until"]),
+             result["model_version"], result["strategy_version"],
+             json.dumps(clean_json(indicators), ensure_ascii=False),
+             json.dumps(clean_json(result["validation_snapshot"]), ensure_ascii=False),
+             json.dumps(clean_json(source), ensure_ascii=False), reason,
+             _market_state_zh(latest.get("regime", "unknown"))))
+        prediction_id = int(cur.lastrowid)
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
     return prediction_id
 
 
@@ -1392,6 +1548,8 @@ def main() -> int:
 
     health_zh = {"healthy": "健康", "degraded": "退化", "insufficient": "樣本不足"}
     print("=" * 62)
+    print("本分析僅供研究與參考，不構成投資建議；00631L 為槓桿型 ETF，"
+          "使用者應自行承擔交易風險與損益。")
     print(f"標的：{args.ticker}　資料日期：{result['latest_date']}　收盤價：{latest_close:.2f}")
     print(f"目前動作：{'等待下一交易日開盤確認' if result['signal'] else '觀望（不買進）'}")
     print(f"預測成功機率：{latest_probability * 100:.1f}%　買進門檻：{args.threshold * 100:.1f}%")

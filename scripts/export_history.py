@@ -25,13 +25,17 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
     with sqlite3.connect(uri, uri=True) as con:
         con.row_factory = sqlite3.Row
         rows = con.execute("""
-            SELECT id, predicted_at, market_date, market_price, action,
-                   model_probability, valid_until, model_version, strategy_version,
-                   suggested_entry, entry_low, entry_high, stop_price,
-                   take_profit_1, take_profit_2,
-                   actual_close, actual_return, prediction_success, settled_at
-            FROM predictions
-            ORDER BY id DESC
+            SELECT p.id, p.predicted_at,
+                   json_extract(p.data_source_snapshot, '$.market_date') AS market_date,
+                   p.market_price, p.action, p.model_probability, p.valid_until,
+                   p.model_version, p.strategy_version, p.buy_price AS suggested_entry,
+                   p.buy_range_low AS entry_low, p.buy_range_high AS entry_high,
+                   p.stop_loss AS stop_price, p.take_profit_1, p.take_profit_2,
+                   o.actual_close, o.actual_return_pct AS actual_return,
+                   o.prediction_success, o.resolved_at AS settled_at
+            FROM predictions p
+            LEFT JOIN prediction_outcomes o ON o.prediction_id=p.id
+            ORDER BY p.id DESC
             LIMIT ?
         """, (limit,)).fetchall()
     records = []

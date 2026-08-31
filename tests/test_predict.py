@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import sqlite3
 import sys
 from types import SimpleNamespace
 
@@ -323,3 +324,40 @@ def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path
             str(tmp_path / "predictions.sqlite3"), result, pd.Series(),
             pd.DataFrame(), SimpleNamespace())
     assert not (tmp_path / "predictions.sqlite3").exists()
+
+
+def test_legacy_database_migration_preserves_rows_and_makes_predictions_immutable(tmp_path):
+    database = tmp_path / "predictions.sqlite3"
+    with sqlite3.connect(database) as con:
+        con.execute("""CREATE TABLE predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, predicted_at TEXT NOT NULL,
+            ticker TEXT NOT NULL, market_date TEXT NOT NULL, market_price REAL NOT NULL,
+            action TEXT NOT NULL, suggested_entry REAL, entry_low REAL, entry_high REAL,
+            stop_price REAL, take_profit_1 REAL, take_profit_2 REAL,
+            model_probability REAL, backtest_win_rate REAL, valid_until TEXT NOT NULL,
+            model_version TEXT NOT NULL, strategy_version TEXT NOT NULL,
+            indicators_json TEXT NOT NULL, reason TEXT NOT NULL, market_regime TEXT NOT NULL,
+            actual_high REAL, actual_low REAL, actual_close REAL, stop_touched INTEGER,
+            target1_touched INTEGER, target2_touched INTEGER, actual_return REAL,
+            trade_result TEXT, prediction_success INTEGER, settled_at TEXT)""")
+        con.execute("""INSERT INTO predictions VALUES (
+            1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("2026-08-18T16:30:00+08:00", "00631L.TW", "2026-08-18", 34.81,
+             "不交易", None, None, None, None, None, None, .33, .45, "2026-08-25",
+             "old-model", "old-strategy", "{}", "legacy", "bull", 36.0, 33.0,
+             35.0, 0, 0, 0, .01, "到期", None, "2026-08-25T16:30:00+08:00"))
+    backup = predict._migrate_legacy_database(str(database))
+    assert backup is not None and Path(backup).exists()
+    with sqlite3.connect(backup) as backup_con:
+        assert backup_con.execute("SELECT count(*) FROM predictions").fetchone()[0] == 1
+        assert "ticker" in {
+            row[1] for row in backup_con.execute("PRAGMA table_info(predictions)")}
+    with sqlite3.connect(database) as con:
+        assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert con.execute("SELECT count(*) FROM predictions").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM prediction_outcomes").fetchone()[0] == 1
+        assert con.execute("SELECT symbol FROM predictions").fetchone()[0] == "00631L"
+        with np.testing.assert_raises_regex(sqlite3.IntegrityError, "不得修改"):
+            con.execute("UPDATE predictions SET market_price=1 WHERE id=1")
+        with np.testing.assert_raises_regex(sqlite3.IntegrityError, "不得刪除"):
+            con.execute("DELETE FROM predictions WHERE id=1")
