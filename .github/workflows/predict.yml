@@ -2,18 +2,10 @@ name: 00631L prediction
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - .github/workflows/predict.yml
-      - public/**
-      - scripts/**
-      - tests/**
-      - requirements.txt
   schedule:
-    # 16:30 Asia/Taipei, Monday-Friday (GitHub cron uses UTC).
-    - cron: "30 8 * * 1-5"
+    # 08:00 Asia/Taipei, Monday-Friday.
+    - cron: "0 8 * * 1-5"
+      timezone: "Asia/Taipei"
 
 permissions:
   contents: read

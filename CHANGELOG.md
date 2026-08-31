@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### Changed
+
+- 2026-08-31（文件／排程變更）：每日正式預測 workflow 改為台北時間週一至週五 08:00 執行，保留手動觸發並移除 push 自動觸發；刪除未使用、原檔名尾端含空白且依賴額外平行 fold 腳本的 `walkforward-parallel.yml `。使用者於 2026-08-31 明確指定保留實際執行流程、刪除不相關 workflow 並調整排程。
+
+### Impact
+
+- 僅影響 GitHub Actions 的觸發時間與重複 workflow；不修改模型、策略、特徵、交易參數、驗證門檻或 SQLite schema，因此不影響勝率、報酬、最大回撤、Profit Factor、交易頻率、訊號或過度擬合風險。移除 push 觸發後，程式更新需等待下一次平日排程或手動執行才會產生新分析。
+
+### Validation
+
+- `predict.yml` 已通過 Ruby YAML 解析、手動／排程觸發靜態檢查、workflow 檔案唯一性及 `git diff --check`；GitHub-hosted runner 的新排程待推送至預設分支後確認。
+
 ### Added
 
 - 2026-08-28（模型 `20260828.4`／策略維持 `20260828.3`）：新增純研究價格管線；每個 Walk-Forward fold 只在訓練窗口尾端時間順序校準期比較固定候選：零報酬、歷史平均、Ridge 與 `0.10／0.25／0.50／0.75／1.00` 收縮 ExtraTrees。候選先滿足校準期方向準確率 52%，再以 MAE 選擇；80% 區間使用 Split Conformal 絕對誤差分位數。使用者於 2026-08-28 明確確認修改。
