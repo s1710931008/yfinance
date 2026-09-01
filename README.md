@@ -276,12 +276,24 @@ EV 仍為正、PF 至少 1.10，才會顯示建議買進區間。任何一項未
 | `--entry-gap-high-atr` | 下一日開盤相對訊號收盤的最高 ATR 位移 | CLI `0.55`；正式候選策略 `0.25` |
 | `--feature-set` | `baseline` 基礎版或 `all` 全指標版 | `all` |
 | `--model` | `extra-trees` 實驗升級版或 `logistic` 基準版 | `extra-trees` |
+| `--label-mode` | `legacy-target` 正式 A 標籤；`trade-outcome` 研究候選 B | `legacy-target` |
 | `--database` | 追加保存預測紀錄的 SQLite 路徑 | `predictions.sqlite3` |
 | `--no-record` | 研究比較時不寫入 SQLite | 不啟用 |
 | `--shares` | 現有持股股數，需搭配平均成本 | 不啟用 |
 | `--average-cost` | 每股平均成本，需搭配持股股數 | 不啟用 |
 | `--add-shares` | 單次加碼／攤平的股數上限 | `100` |
 | `--output-json` | 完整結果及交易明細檔案 | 不輸出 |
+
+候選 B 將正類別定義為「下一交易日開盤符合成交區間，且依現行停損、
+停利與時間出場後，扣除成本仍獲利」。候選 B 目前未通過正式驗證，不是每日排程版；
+研究比較必須加 `--no-record`：
+
+```bash
+.venv/bin/python scripts/predict.py 00631L.TW \
+  --period max --folds 5 \
+  --context 0050.TW 2330.TW ^TWII \
+  --label-mode trade-outcome --no-record
+```
 
 一般股票的波動通常低於槓桿 ETF，4% 的五日目標可能過高。例如台積電可以先研究：
 

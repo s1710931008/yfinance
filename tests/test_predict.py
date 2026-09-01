@@ -165,6 +165,28 @@ def test_same_bar_stop_and_target_is_conservative():
     assert trade.net_r == -1.0
 
 
+def test_trade_outcome_label_matches_profitable_target_and_conservative_stop():
+    market = market_frame()
+    market["ATR"] = 1.0
+    labels = predict.trade_outcome_labels(
+        market, 5, 1.5, 2.0, 0, 0, 0, -0.25, 0.25)
+    assert labels.iloc[0] == 1.0
+    market.loc[market.index[1], ["High", "Low"]] = [104, 97]
+    labels = predict.trade_outcome_labels(
+        market, 5, 1.5, 2.0, 0, 0, 0, -0.25, 0.25)
+    assert labels.iloc[0] == 0.0
+
+
+def test_trade_outcome_label_counts_unfilled_next_open_as_unsuccessful_event():
+    market = market_frame()
+    market["ATR"] = 1.0
+    market.loc[market.index[1], "Open"] = 102.0
+    labels = predict.trade_outcome_labels(
+        market, 5, 1.5, 2.0, 14.25, 10, 5, -0.25, 0.25)
+    assert labels.iloc[0] == 0.0
+    assert labels.iloc[-5:].isna().all()
+
+
 def test_averaging_backtest_records_add_and_keeps_stop_first():
     market = market_frame()
     rows = market.iloc[[0]].copy()

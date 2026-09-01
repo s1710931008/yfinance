@@ -81,6 +81,9 @@ def parse_args() -> argparse.Namespace:
                    help="all is the AGENTS.md default; baseline is retained for comparison")
     p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees",
                    help="Prediction model (default: extra-trees experimental candidate)")
+    p.add_argument("--label-mode", choices=["legacy-target", "trade-outcome"],
+                   default="legacy-target",
+                   help="Classifier target; trade-outcome is research candidate B")
     p.add_argument("--output-json", help="Optional path for machine-readable results")
     p.add_argument("--database", default="predictions.sqlite3",
                    help="Append-only prediction history database")
@@ -241,9 +244,57 @@ def add_technical_features(d: pd.DataFrame) -> list[str]:
             "kd_spread", "macd", "macd_signal", "macd_hist", "macd_hist_delta"]
 
 
+def trade_outcome_labels(market: pd.DataFrame, horizon: int, stop_atr: float,
+                         reward_risk: float, commission_bps: float,
+                         tax_bps: float, slippage_bps: float,
+                         entry_gap_low_atr: float,
+                         entry_gap_high_atr: float) -> pd.Series:
+    """Return candidate-B labels using the executable trade's net outcome.
+
+    The positive event is joint: the next open must be inside the precommitted
+    interval and the resulting trade must be profitable after costs. An
+    out-of-range next open is therefore a known class 0, not a future-selected
+    missing row. Same-bar stop/target ambiguity is resolved as a stop.
+    """
+    labels = pd.Series(0.0, index=market.index, dtype=float)
+    if horizon:
+        labels.iloc[-horizon:] = np.nan
+    for i in range(len(market) - horizon):
+        row = market.iloc[i]
+        atr = float(row["ATR"])
+        if not np.isfinite(atr) or atr <= 0:
+            continue
+        entry_i = i + 1
+        gap_atr = (float(market.Open.iloc[entry_i]) - float(row.Close)) / atr
+        if not entry_gap_low_atr <= gap_atr <= entry_gap_high_atr:
+            continue
+        entry = float(market.Open.iloc[entry_i]) * (1 + slippage_bps / 10_000)
+        risk = stop_atr * atr
+        stop, target_price = entry - risk, entry + reward_risk * risk
+        exit_i, exit_px = i + horizon, float(market.Close.iloc[i + horizon])
+        for j in range(entry_i, exit_i + 1):
+            if float(market.Low.iloc[j]) <= stop:
+                exit_px = stop
+                break
+            if float(market.High.iloc[j]) >= target_price:
+                exit_px = target_price
+                break
+        exit_px *= 1 - slippage_bps / 10_000
+        costs = (entry * commission_bps / 10_000
+                 + exit_px * (commission_bps + tax_bps) / 10_000)
+        labels.iloc[i] = float(exit_px - entry - costs > 0)
+    return labels
+
+
 def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
                   horizon: int, target: float, adverse: float,
-                  feature_set: str = "baseline") -> tuple[pd.DataFrame, list[str]]:
+                  feature_set: str = "baseline",
+                  label_mode: str = "legacy-target",
+                  stop_atr: float = 1.5, reward_risk: float = 2.0,
+                  commission_bps: float = 14.25, tax_bps: float = 10.0,
+                  slippage_bps: float = 5.0,
+                  entry_gap_low_atr: float = -0.25,
+                  entry_gap_high_atr: float = 0.25) -> tuple[pd.DataFrame, list[str]]:
     d = primary.copy()
     prev_close = d["Close"].shift()
     tr = pd.concat([(d.High - d.Low), (d.High - prev_close).abs(),
@@ -294,7 +345,12 @@ def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
     d["future_return"] = future_close
     d["future_high_return"] = future_highs
     d["future_low_return"] = future_lows
-    d["label"] = ((future_close >= target) & (future_lows >= adverse)).astype(float)
+    if label_mode == "trade-outcome":
+        d["label"] = trade_outcome_labels(
+            d, horizon, stop_atr, reward_risk, commission_bps, tax_bps,
+            slippage_bps, entry_gap_low_atr, entry_gap_high_atr)
+    else:
+        d["label"] = ((future_close >= target) & (future_lows >= adverse)).astype(float)
     d.loc[d.index[-horizon:], ["label", "future_return", "future_high_return",
                               "future_low_return"]] = np.nan
     d["regime"] = np.select(
@@ -931,6 +987,7 @@ def clean_json(value):
 
 
 MODEL_VERSION = "20260828.4"
+CANDIDATE_B_MODEL_VERSION = "20260901.1"
 STRATEGY_VERSION = "20260828.3"
 DATABASE_SCHEMA_VERSION = "20260831.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
@@ -1318,8 +1375,11 @@ def main() -> int:
         raise SystemExit(str(exc)) from exc
     context_symbols = list(args.context) + ([args.futures_symbol] if args.futures_symbol else [])
     primary, contexts, skipped = download_data(args.ticker, context_symbols, args.period)
-    data, features = build_dataset(primary, contexts, args.horizon, args.target,
-                                   args.adverse, args.feature_set)
+    data, features = build_dataset(
+        primary, contexts, args.horizon, args.target, args.adverse,
+        args.feature_set, args.label_mode, args.stop_atr, args.reward_risk,
+        args.commission_bps, args.tax_bps, args.slippage_bps,
+        args.entry_gap_low_atr, args.entry_gap_high_atr)
     usable = data.dropna(subset=["label", "ATR"]).copy()
     cut = int(len(usable) * (1 - args.final_test))
     dev, final = usable.iloc[:cut], usable.iloc[cut:]
@@ -1461,8 +1521,11 @@ def main() -> int:
         args.horizon, valid_until, oos_return_forecast, final_return_forecast)
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
-        "model_version": (MODEL_VERSION if args.model == "extra-trees" else
+        "model_version": (CANDIDATE_B_MODEL_VERSION
+                          if args.label_mode == "trade-outcome" else
+                          MODEL_VERSION if args.model == "extra-trees" else
                           "20260818.1"),
+        "label_mode": args.label_mode,
         "strategy_version": STRATEGY_VERSION,
         "latest_date": str(latest.index[0].date()),
         "latest_price": latest_close, "latest_probability": latest_probability,
@@ -1566,6 +1629,9 @@ def main() -> int:
     model_zh = "ExtraTrees 完整技術指標版" if args.model == "extra-trees" else "Logistic 基準版"
     features_zh = "全技術指標" if args.feature_set == "all" else "基礎特徵"
     print(f"模型版本：{model_zh}；{features_zh}")
+    print("分類標籤：" + ("候選 B－扣成本後的實際交易結果"
+                         if args.label_mode == "trade-outcome" else
+                         "A 基準－未來報酬與不利波動目標"))
     print(f"版本代碼：模型 {result['model_version']}；策略 {result['strategy_version']}")
     print(f"交易驗證閘門：{'通過' if gate['passed'] else '未通過'}")
     validation_zh = {
