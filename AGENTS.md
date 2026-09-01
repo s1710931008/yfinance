@@ -607,3 +607,48 @@ END;
 6\. 所有正式變更必須建立新版本並更新 `CHANGELOG.md`。
 
 7\. 所有分析輸出必須附上免責聲明。
+
+---
+
+## 七、Git Push 與重新執行規範
+
+### 1. Push 後是否需要重新 Run
+
+只要本次修改包含 `AGENTS.md`、模型規則、策略規則、程式碼、設定檔或任何會影響執行行為的內容，在完成 `git push` 後，**必須重新啟動新的 Run，重新載入最新版本的程式碼與 `AGENTS.md` 規則**。
+
+不得假設已經在執行中的舊 Run 會自動重新讀取 push 後的 `AGENTS.md` 或程式碼變更。
+
+標準流程：
+
+```text
+修改檔案
+→ 檢查變更
+→ git commit
+→ git push
+→ 重新 Run
+→ 確認新 Run 已讀取最新 AGENTS.md 與最新程式碼
+→ 再執行預測／回測／分析
+```
+
+### 2. 正式服務是否需要 Restart
+
+`git push` 本身只會更新遠端 Git Repository，**不代表正在執行中的 FastAPI、Node.js、Worker、Docker Container 或其他服務已自動套用新版本**。
+
+- 若環境有 CI/CD，且 push 後會自動完成 deploy、restart／rolling restart，則依 CI/CD 流程執行，不需要額外手動 restart。
+- 若沒有自動部署機制，則伺服器端完成 `git pull` 或更新程式後，必須重新啟動相關服務。
+- 若修改的是 Docker Image 內的程式碼，必須重新 build／deploy Container，除非目前開發環境使用 bind mount 並已確認支援熱更新。
+- 若只修改 `AGENTS.md`，不一定需要重啟 FastAPI／Node.js 正式服務；但**AI／Codex 的新工作必須重新 Run，確保讀取最新規則**。
+
+### 3. 執行前版本確認
+
+重新 Run 後，執行預測、回測或模型修改前，應確認目前使用的是最新 commit。
+
+至少確認：
+
+```text
+git status
+git log -1 --oneline
+```
+
+如本地端或執行環境版本不是最新 push 的 commit，不得宣稱已使用最新模型、策略或 `AGENTS.md` 規則。
+
