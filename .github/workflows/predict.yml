@@ -61,6 +61,7 @@ jobs:
             --target 0.04 \
             --adverse -0.025 \
             --folds 5 \
+            --label-mode trade-outcome \
             --database artifacts/predictions.sqlite3 \
             --output-json artifacts/validation.json \
             2>&1 | tee artifacts/predict.log

@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees",
                    help="Prediction model (default: extra-trees experimental candidate)")
     p.add_argument("--label-mode", choices=["legacy-target", "trade-outcome"],
-                   default="legacy-target",
-                   help="Classifier target; trade-outcome is research candidate B")
+                   default="trade-outcome",
+                   help="Classifier target; trade-outcome is daily default B")
     p.add_argument("--output-json", help="Optional path for machine-readable results")
     p.add_argument("--database", default="predictions.sqlite3",
                    help="Append-only prediction history database")
