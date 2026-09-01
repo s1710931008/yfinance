@@ -3,8 +3,8 @@ name: 00631L prediction
 on:
   workflow_dispatch:
   schedule:
-    # 08:00 Asia/Taipei, Monday-Friday.
-    - cron: "0 8 * * 1-5"
+    # 05:00 Asia/Taipei, Monday-Friday. Scheduled early to absorb GitHub queue delays.
+    - cron: "0 5 * * 1-5"
       timezone: "Asia/Taipei"
 
 permissions:

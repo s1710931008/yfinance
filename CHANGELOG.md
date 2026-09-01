@@ -8,17 +8,20 @@
 
 ### Changed
 
+- 2026-09-01（文件／排程變更）：使用者明確指定將 GitHub Actions 平日排程再往前調整 3 小時，由 Asia/Taipei 08:00 改為週一至週五 05:00；保留手動觸發，不新增 push 觸發。調整原因是 2026-09-01 原定 08:00 的 GitHub 排程實際至 10:19 才開始，預留排隊延遲緩衝。
 - 2026-08-31（資料庫／寫入流程 `20260831.1`）：使用者於 2026-08-31 明確確認升級 SQLite 與寫入流程。原始預測改為 append-only `predictions`，實際結果只新增至 `prediction_outcomes`；啟用 WAL、foreign key、busy timeout、UPDATE／DELETE 阻擋 trigger，並將預測與 JSON snapshots 置於同一 transaction。舊 schema 首次寫入前會產生時間戳備份並以 transaction 遷移。
 - 終端標準輸出補上 `AGENTS.md` 要求的 00631L 槓桿 ETF 完整免責聲明；這是風險揭露修正，不影響模型計算。
 - 2026-08-31（文件／排程變更）：每日正式預測 workflow 改為台北時間週一至週五 08:00 執行，保留手動觸發並移除 push 自動觸發；刪除未使用、原檔名尾端含空白且依賴額外平行 fold 腳本的 `walkforward-parallel.yml `。使用者於 2026-08-31 明確指定保留實際執行流程、刪除不相關 workflow 並調整排程。
 
 ### Impact
 
+- 05:00 排程只改變 GitHub Actions 觸發時間；不修改模型、策略、特徵、交易成本、驗證門檻、SQLite schema 或訊號，因此不影響勝率、報酬、Profit Factor、最大回撤、交易頻率或過度擬合風險。提前執行僅為預留 GitHub 排隊時間，無法保證完成時間。
 - SQLite 升級不修改模型、特徵、交易參數、驗證門檻或訊號判定，預期不影響勝率、報酬、最大回撤、Profit Factor、交易頻率或風險報酬比，也不增加模型過度擬合風險。影響限於紀錄完整性、歷史可稽核性及查詢方式。
 - 僅影響 GitHub Actions 的觸發時間與重複 workflow；不修改模型、策略、特徵、交易參數、驗證門檻或 SQLite schema，因此不影響勝率、報酬、最大回撤、Profit Factor、交易頻率、訊號或過度擬合風險。移除 push 觸發後，程式更新需等待下一次平日排程或手動執行才會產生新分析。
 
 ### Validation
 
+- 05:00 排程已通過 YAML 解析、排程與時區靜態檢查；GitHub 實際觸發時間待推送後的下一個平日觀察。
 - SQLite `20260831.1` 已通過 29 項本機測試、舊資料庫副本遷移、SQLite 一致性備份、UPDATE／DELETE trigger、foreign key check、`PRAGMA integrity_check`、公開歷史匯出與 workflow YAML 驗證。正式資料庫舊 2 筆預測均保留，已將 2 筆到期結果新增至 `prediction_outcomes`，並成功新增 2026-08-31 的 prediction ID 5；備份為 `predictions.sqlite3.legacy-20260831T222748+0800.bak`。
 - 寫入前後以同一程式及參數的 `--no-record` 與正式寫入執行比較：動作、訊號、OOS 交易統計、Final Test、正式驗證、執行價格與版本一致。兩次獨立 Yahoo 下載間最新機率有 0.03 個百分點、嚴格驗證 EV 有 0.0001R 的微小差異，但未改變任何通過狀態或結論；不將此微小資料差異作為 SQLite 改善績效的主張。
 - `predict.yml` 已通過 Ruby YAML 解析、手動／排程觸發靜態檢查、workflow 檔案唯一性及 `git diff --check`；GitHub-hosted runner 的新排程待推送至預設分支後確認。
