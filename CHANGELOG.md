@@ -8,6 +8,7 @@
 
 ### Changed
 
+- 2026-09-02（Page 顯示）：使用者明確確認在「價位與買賣點」直接顯示研究預測價、研究買進價與區間、研究停損、兩段研究停利及研究有效期限。正式交易價位仍獨立呈現，驗證未通過時維持「驗證通過前不提供」；研究欄位明確標示未驗證、不可交易、不是買賣建議。
 - 2026-09-02（GitHub Actions 觸發方式）：使用者明確指定恢復 `main` 分支的 `push` 自動觸發，同時保留平日 05:00（Asia/Taipei）排程與手動 `workflow_dispatch`。推送本次變更後即會觸發一次完整預測與發布流程。
 - 2026-09-02（SQLite schema／公開歷史 `20260902.1`）：使用者明確指定研究情境「都寫入記錄」。新增 append-only `prediction_research_scenarios`，以 prediction ID 一對一保存原始研究估計與區間、情境進場與區間、情境停損、情境停利一／二、驗證狀態、警語、失敗驗證、參數假設與期限；與 `predictions` 在同一 transaction 新增，並以 trigger 禁止 UPDATE／DELETE。歷史 JSON 與 Page 改為可查詢新版本的全部研究情境；舊紀錄不事後補造。
 - 2026-09-01（輸出／策略版本 `20260901.2`；模型 B 維持 `20260901.1`）：使用者明確確認「新增未驗證研究情境價位，但正式 action 維持不交易，正式買賣欄位維持空值」。新增獨立 `research_scenario`，顯示原始研究估計與區間、情境進場與區間、情境停損、情境停利一／二、期限及失敗驗證；終端與 GitHub Pages 必須明顯標示「未驗證、不可交易、不是買賣建議」。同步修訂 `AGENTS.md` 的有限例外。
@@ -20,6 +21,7 @@
 
 ### Impact
 
+- Page 變更只把既有 `research_scenario` 複製顯示於價位區塊，不改變模型、SQLite schema、正式 action、訊號、成本、驗證門檻、勝率、Profit Factor 或回撤；研究價仍不計入正式交易與 outcome。
 - 新增 `push` 只改變執行時機，不改變模型、特徵、交易規則、驗證門檻或回測結果。每次推送 `main` 都會執行完整測試、模型、SQLite 新增及 Pages 發布；若與平日排程接近，兩次 run 會依 concurrency 設定排隊而不互相取消，可能針對同一行情日新增兩筆不可變紀錄。
 - `20260902.1` 只改變研究紀錄與公開查詢，不改變模型、訊號、成本、驗證門檻、勝率、EV_R、PF 或回撤。正式 `predictions` 買進／停損／停利欄位在不交易時仍為 `NULL`，`prediction_outcomes` 不讀取研究情境，避免污染正式勝率。
 - `research_scenario` 只增加研究輸出，不改變特徵、分類器、機率、訊號、進出場規則、驗證門檻、回測勝率、EV_R、PF 或回撤。主要風險是使用者將未驗證數值誤當正式建議，因此正式 `execution_plan` 及 SQLite 買賣價位保持空值，且研究數值不計入 outcome 或交易勝率。
@@ -30,6 +32,7 @@
 
 ### Validation
 
+- 價位區塊七個研究欄位已通過 Page JavaScript 語法、DOM ID 完整性、資料缺少時的 fail-closed 顯示及全套 35 項本機測試。
 - `push`、`workflow_dispatch` 與平日排程三種觸發器已通過 workflow YAML 解析及靜態檢查；實際 push run 狀態以本次推送後的 GitHub Actions 結果為準。
 - `20260902.1` 已通過 35 項本機測試，涵蓋研究情境與正式預測同 transaction 寫入、正式不交易欄位維持 `NULL`、一對一 foreign key、UPDATE trigger、舊資料庫無研究表時的歷史匯出相容性，以及公開 JSON 研究欄位。另已通過 Python 編譯、Page JavaScript 語法、workflow YAML 解析與 `git diff --check`；本次未修改模型、特徵、訊號、成本或驗證門檻，因此回測統計不變。
 - `research_scenario` 已通過 34 項本機測試、Page 欄位與 JavaScript 語法檢查、無效輸入關閉、正式 action／execution plan／SQLite 隔離及 `PRAGMA integrity_check`。實際 B `--period max --no-record` 執行成功：正式 action 為「不交易」、signal 為 false，正式買進價／區間／停損／兩段停利及臨時 SQLite 對應欄位均為 `NULL`；研究情境獨立保存於 validation snapshot。與修改前 B 比較，OOS 交易統計、Final Test、正式驗證及交易門檻逐項一致，確認本變更不影響模型或交易績效。
