@@ -1,6 +1,9 @@
 name: 00631L prediction
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
   schedule:
     # 05:00 Asia/Taipei, Monday-Friday. Scheduled early to absorb GitHub queue delays.

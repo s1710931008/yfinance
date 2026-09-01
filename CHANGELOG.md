@@ -8,6 +8,7 @@
 
 ### Changed
 
+- 2026-09-02（GitHub Actions 觸發方式）：使用者明確指定恢復 `main` 分支的 `push` 自動觸發，同時保留平日 05:00（Asia/Taipei）排程與手動 `workflow_dispatch`。推送本次變更後即會觸發一次完整預測與發布流程。
 - 2026-09-02（SQLite schema／公開歷史 `20260902.1`）：使用者明確指定研究情境「都寫入記錄」。新增 append-only `prediction_research_scenarios`，以 prediction ID 一對一保存原始研究估計與區間、情境進場與區間、情境停損、情境停利一／二、驗證狀態、警語、失敗驗證、參數假設與期限；與 `predictions` 在同一 transaction 新增，並以 trigger 禁止 UPDATE／DELETE。歷史 JSON 與 Page 改為可查詢新版本的全部研究情境；舊紀錄不事後補造。
 - 2026-09-01（輸出／策略版本 `20260901.2`；模型 B 維持 `20260901.1`）：使用者明確確認「新增未驗證研究情境價位，但正式 action 維持不交易，正式買賣欄位維持空值」。新增獨立 `research_scenario`，顯示原始研究估計與區間、情境進場與區間、情境停損、情境停利一／二、期限及失敗驗證；終端與 GitHub Pages 必須明顯標示「未驗證、不可交易、不是買賣建議」。同步修訂 `AGENTS.md` 的有限例外。
 - 2026-09-01（模型 `20260901.1`／策略維持 `20260828.3`）：使用者在已知候選 B 仍未通過正式驗證後，明確指定「那就用 B 就好」。CLI 預設標籤與 GitHub 每日 workflow 因此切換為 `trade-outcome`；舊 A 保留為 `--label-mode legacy-target` 供重現比較。不降低驗證門檻；B 驗證未通過期間，每日結論只能是「不交易」，不得提供買進價、停損或停利價。
@@ -19,6 +20,7 @@
 
 ### Impact
 
+- 新增 `push` 只改變執行時機，不改變模型、特徵、交易規則、驗證門檻或回測結果。每次推送 `main` 都會執行完整測試、模型、SQLite 新增及 Pages 發布；若與平日排程接近，兩次 run 會依 concurrency 設定排隊而不互相取消，可能針對同一行情日新增兩筆不可變紀錄。
 - `20260902.1` 只改變研究紀錄與公開查詢，不改變模型、訊號、成本、驗證門檻、勝率、EV_R、PF 或回撤。正式 `predictions` 買進／停損／停利欄位在不交易時仍為 `NULL`，`prediction_outcomes` 不讀取研究情境，避免污染正式勝率。
 - `research_scenario` 只增加研究輸出，不改變特徵、分類器、機率、訊號、進出場規則、驗證門檻、回測勝率、EV_R、PF 或回撤。主要風險是使用者將未驗證數值誤當正式建議，因此正式 `execution_plan` 及 SQLite 買賣價位保持空值，且研究數值不計入 outcome 或交易勝率。
 - 候選 B 將預測目標與實際交易損益對齊，可能改變機率、訊號數、交易數、勝率、EV_R、Profit Factor 與回撤；標籤與固定交易規則綁定可能增加過度擬合風險。候選 B 以 0 保留未達下一日開盤成交條件的樣本，避免用未來資料篩選訓練集。因此不能只看單次勝率，必須比較 A／B 的 Walk-Forward、獨立 Final Test、fold 穩定性與雙倍成本壓力。
@@ -28,6 +30,7 @@
 
 ### Validation
 
+- `push`、`workflow_dispatch` 與平日排程三種觸發器已通過 workflow YAML 解析及靜態檢查；實際 push run 狀態以本次推送後的 GitHub Actions 結果為準。
 - `20260902.1` 已通過 35 項本機測試，涵蓋研究情境與正式預測同 transaction 寫入、正式不交易欄位維持 `NULL`、一對一 foreign key、UPDATE trigger、舊資料庫無研究表時的歷史匯出相容性，以及公開 JSON 研究欄位。另已通過 Python 編譯、Page JavaScript 語法、workflow YAML 解析與 `git diff --check`；本次未修改模型、特徵、訊號、成本或驗證門檻，因此回測統計不變。
 - `research_scenario` 已通過 34 項本機測試、Page 欄位與 JavaScript 語法檢查、無效輸入關閉、正式 action／execution plan／SQLite 隔離及 `PRAGMA integrity_check`。實際 B `--period max --no-record` 執行成功：正式 action 為「不交易」、signal 為 false，正式買進價／區間／停損／兩段停利及臨時 SQLite 對應欄位均為 `NULL`；研究情境獨立保存於 validation snapshot。與修改前 B 比較，OOS 交易統計、Final Test、正式驗證及交易門檻逐項一致，確認本變更不影響模型或交易績效。
 - 候選 B 已通過 31 項本機測試，包含扣成本交易標籤、同日停損優先、開盤未成交聯合事件與末 5 日未知結果。A／B 使用相同 2014-11-11～2024-04-16 開發期及相同 Final Test 重跑：A OOS 56 筆、勝率 48.2%、EV_R -0.168、PF 0.652、回撤 20.1%；B OOS 66 筆、勝率 50.0%、EV_R -0.035、PF 0.911、回撤 15.7%。B Final Test 43 筆、勝率 67.4%、EV_R 0.433、PF 2.678、回撤 7.8%。B 雖改善 A，但 OOS EV_R 仍為負、PF 未達 1.2、OOS／Final Test 勝率差超過 10 個百分點，且多重驗證雙倍成本中位 EV_R -0.116、PF 0.765，因此正式驗證與嚴格進場驗證均未通過。候選 B 保留研究，不啟用為正式建議版本。
