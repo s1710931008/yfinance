@@ -139,6 +139,29 @@ def test_research_price_forecast_hides_prices_when_validation_fails():
     assert "價格模型自身驗證未通過" in forecast["unavailable_reason"]
 
 
+def test_unvalidated_research_scenario_is_numeric_but_not_actionable():
+    scenario = predict.build_research_scenario(
+        100, .05, -.10, .15, 2, -.25, .25, 1.5, 2.5,
+        "2026-09-08", False)
+    assert scenario["available"]
+    assert not scenario["validated"]
+    assert scenario["not_actionable"]
+    assert scenario["raw_estimated_price"] == 105
+    assert scenario["scenario_entry"] == 100
+    assert scenario["scenario_stop"] == 97
+    assert scenario["scenario_take_profit_1"] == 103
+    assert scenario["scenario_take_profit_2"] == 107.5
+    assert "不可交易" in scenario["warning"]
+
+
+def test_research_scenario_hides_values_when_inputs_are_invalid():
+    scenario = predict.build_research_scenario(
+        100, np.nan, -.10, .15, 2, -.25, .25, 1.5, 2.5,
+        "2026-09-08", False)
+    assert not scenario["available"]
+    assert "raw_estimated_price" not in scenario
+
+
 def test_research_return_model_does_not_read_test_outcomes():
     rng = np.random.default_rng(42)
     train = pd.DataFrame({

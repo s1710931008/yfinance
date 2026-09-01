@@ -988,7 +988,7 @@ def clean_json(value):
 
 MODEL_VERSION = "20260828.4"
 CANDIDATE_B_MODEL_VERSION = "20260901.1"
-STRATEGY_VERSION = "20260828.3"
+STRATEGY_VERSION = "20260901.2"
 DATABASE_SCHEMA_VERSION = "20260831.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
@@ -1082,6 +1082,50 @@ def research_price_forecast(latest_close: float, predicted_return: float,
         "validation_passed": validation_passed,
         "unavailable_reason": (None if available else
                                "價格模型自身驗證未通過，不顯示中央預測價格或區間"),
+    }
+
+
+def build_research_scenario(latest_close: float, predicted_return: float,
+                            return_low: float, return_high: float, atr: float,
+                            entry_gap_low_atr: float, entry_gap_high_atr: float,
+                            stop_atr: float, reward_risk: float,
+                            valid_until: str, validation_passed: bool) -> dict[str, object]:
+    """Build isolated, non-actionable price scenarios from successful raw calculations."""
+    values = (latest_close, predicted_return, return_low, return_high, atr,
+              entry_gap_low_atr, entry_gap_high_atr, stop_atr, reward_risk)
+    available = bool(all(np.isfinite(value) for value in values)
+                     and latest_close > 0 and atr > 0 and return_low <= return_high)
+    if not available:
+        return {
+            "available": False, "validated": False, "not_actionable": True,
+            "warning": "資料或計算不完整，不產生研究情境價位",
+        }
+    entry_low = latest_close + entry_gap_low_atr * atr
+    entry_high = latest_close + entry_gap_high_atr * atr
+    entry = (entry_low + entry_high) / 2
+    risk = stop_atr * atr
+    return {
+        "available": True,
+        "validated": bool(validation_passed),
+        "not_actionable": True,
+        "warning": "未驗證研究情境；不可交易；不是買賣建議",
+        "raw_estimated_price": latest_close * (1 + predicted_return),
+        "raw_estimated_price_low": latest_close * (1 + return_low),
+        "raw_estimated_price_high": latest_close * (1 + return_high),
+        "scenario_entry": entry,
+        "scenario_entry_low": entry_low,
+        "scenario_entry_high": entry_high,
+        "scenario_stop": entry - risk,
+        "scenario_take_profit_1": entry + risk,
+        "scenario_take_profit_2": entry + reward_risk * risk,
+        "valid_until": valid_until,
+        "assumptions": {
+            "entry_gap_low_atr": entry_gap_low_atr,
+            "entry_gap_high_atr": entry_gap_high_atr,
+            "stop_atr": stop_atr,
+            "reward_risk_1": 1.0,
+            "reward_risk_2": reward_risk,
+        },
     }
 
 
@@ -1304,6 +1348,8 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
         source["database_schema_version"] = DATABASE_SCHEMA_VERSION
         reason = ("正式驗證、訊號、交易閘門與嚴格進場驗證全部通過" if signal else
                   "正式驗證、機率、交易閘門或嚴格進場驗證未全部通過")
+        validation_payload = dict(result["validation_snapshot"])
+        validation_payload["research_scenario"] = result.get("research_scenario")
         cur = con.execute("""INSERT INTO predictions (
             predicted_at,timezone,symbol,market_price,action,buy_price,buy_range_low,
             buy_range_high,position_sizing,stop_loss,take_profit_1,take_profit_2,
@@ -1323,7 +1369,7 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
              result["oos_trading"]["win_rate"], str(result["valid_until"]),
              result["model_version"], result["strategy_version"],
              json.dumps(clean_json(indicators), ensure_ascii=False),
-             json.dumps(clean_json(result["validation_snapshot"]), ensure_ascii=False),
+             json.dumps(clean_json(validation_payload), ensure_ascii=False),
              json.dumps(clean_json(source), ensure_ascii=False), reason,
              _market_state_zh(latest.get("regime", "unknown"))))
         prediction_id = int(cur.lastrowid)
@@ -1519,6 +1565,20 @@ def main() -> int:
     price_forecast = research_price_forecast(
         latest_close, latest_research_return, latest_research_low, latest_research_high,
         args.horizon, valid_until, oos_return_forecast, final_return_forecast)
+    research_scenario = build_research_scenario(
+        latest_close, latest_research_return, latest_research_low,
+        latest_research_high, latest_atr, args.entry_gap_low_atr,
+        args.entry_gap_high_atr, args.stop_atr, args.reward_risk, valid_until,
+        bool(forecast_validation_passed and formal_passed and gate["passed"]
+             and strict_passed))
+    research_scenario["failed_validations"] = [
+        name for name, passed in {
+            "research_price_model": forecast_validation_passed,
+            "formal_validation": formal_passed,
+            "trading_gate": bool(gate["passed"]),
+            "strict_entry_validation": strict_passed,
+        }.items() if not passed
+    ]
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
         "model_version": (CANDIDATE_B_MODEL_VERSION
@@ -1549,6 +1609,7 @@ def main() -> int:
                        "next_open_known": False},
         "execution_plan": execution_plan,
         "price_forecast": price_forecast,
+        "research_scenario": research_scenario,
         "candidate_strategy": {"version": STRATEGY_VERSION,
                                "parameters": CANDIDATE_20260819_3,
                                "risk_policy": RISK_POLICY_20260828_2,
@@ -1676,6 +1737,19 @@ def main() -> int:
     print(f"價格模型保留期：MAE {pct(final_forecast['mae'])}；方向準確率 "
           f"{pct(final_forecast['direction_accuracy'])}；80% 區間覆蓋率 "
           f"{pct(final_forecast['interval_80_coverage'])}")
+    scenario = result["research_scenario"]
+    if scenario.get("available") and not scenario.get("validated"):
+        print("未驗證研究情境（不可交易，不是買賣建議）：")
+        print(f"  原始研究估計：{scenario['raw_estimated_price']:.2f}；"
+              f"區間 {scenario['raw_estimated_price_low']:.2f}～"
+              f"{scenario['raw_estimated_price_high']:.2f}")
+        print(f"  情境進場：{scenario['scenario_entry']:.2f}；"
+              f"區間 {scenario['scenario_entry_low']:.2f}～"
+              f"{scenario['scenario_entry_high']:.2f}")
+        print(f"  情境停損：{scenario['scenario_stop']:.2f}；"
+              f"情境停利一：{scenario['scenario_take_profit_1']:.2f}；"
+              f"情境停利二：{scenario['scenario_take_profit_2']:.2f}")
+        print("  未通過：" + "、".join(scenario["failed_validations"]))
     if result["signal"]:
         print(f"歷史回測較穩健的下一交易日買進區間：{entry_plan['acceptable_low']:.2f}～"
               f"{entry_plan['acceptable_high']:.2f}")
