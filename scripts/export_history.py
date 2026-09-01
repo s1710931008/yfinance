@@ -24,7 +24,24 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
     uri = f"file:{Path(database).resolve()}?mode=ro"
     with sqlite3.connect(uri, uri=True) as con:
         con.row_factory = sqlite3.Row
-        rows = con.execute("""
+        has_research = con.execute("""SELECT 1 FROM sqlite_master
+            WHERE type='table' AND name='prediction_research_scenarios'""").fetchone() is not None
+        research_columns = ("""r.raw_estimated_price, r.raw_estimated_price_low,
+                   r.raw_estimated_price_high, r.scenario_entry,
+                   r.scenario_entry_low, r.scenario_entry_high, r.scenario_stop,
+                   r.scenario_take_profit_1, r.scenario_take_profit_2,
+                   r.validated AS research_validated,
+                   r.not_actionable AS research_not_actionable, r.warning AS research_warning"""
+                            if has_research else
+                            """NULL AS raw_estimated_price, NULL AS raw_estimated_price_low,
+                   NULL AS raw_estimated_price_high, NULL AS scenario_entry,
+                   NULL AS scenario_entry_low, NULL AS scenario_entry_high,
+                   NULL AS scenario_stop, NULL AS scenario_take_profit_1,
+                   NULL AS scenario_take_profit_2, NULL AS research_validated,
+                   NULL AS research_not_actionable, NULL AS research_warning""")
+        research_join = ("LEFT JOIN prediction_research_scenarios r ON r.prediction_id=p.id"
+                         if has_research else "")
+        rows = con.execute(f"""
             SELECT p.id, p.predicted_at,
                    json_extract(p.data_source_snapshot, '$.market_date') AS market_date,
                    p.market_price, p.action, p.model_probability, p.valid_until,
@@ -32,9 +49,11 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
                    p.buy_range_low AS entry_low, p.buy_range_high AS entry_high,
                    p.stop_loss AS stop_price, p.take_profit_1, p.take_profit_2,
                    o.actual_close, o.actual_return_pct AS actual_return,
-                   o.prediction_success, o.resolved_at AS settled_at
+                   o.prediction_success, o.resolved_at AS settled_at,
+                   {research_columns}
             FROM predictions p
             LEFT JOIN prediction_outcomes o ON o.prediction_id=p.id
+            {research_join}
             ORDER BY p.id DESC
             LIMIT ?
         """, (limit,)).fetchall()
@@ -46,6 +65,7 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
             row[name] is not None for name in (
                 "suggested_entry", "entry_low", "entry_high", "stop_price",
                 "take_profit_1", "take_profit_2"))
+        has_research_scenario = row["scenario_entry"] is not None
         records.append({
             "id": row["id"],
             "predicted_at": row["predicted_at"],
@@ -63,6 +83,29 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
             "stop_price": row["stop_price"] if has_trade_levels else None,
             "take_profit_1": row["take_profit_1"] if has_trade_levels else None,
             "take_profit_2": row["take_profit_2"] if has_trade_levels else None,
+            "research_scenario_available": has_research_scenario,
+            "research_validated": (bool(row["research_validated"])
+                                   if has_research_scenario else None),
+            "research_not_actionable": (bool(row["research_not_actionable"])
+                                        if has_research_scenario else None),
+            "research_warning": (row["research_warning"]
+                                 if has_research_scenario else None),
+            "raw_estimated_price": (row["raw_estimated_price"]
+                                    if has_research_scenario else None),
+            "raw_estimated_price_low": (row["raw_estimated_price_low"]
+                                        if has_research_scenario else None),
+            "raw_estimated_price_high": (row["raw_estimated_price_high"]
+                                         if has_research_scenario else None),
+            "scenario_entry": row["scenario_entry"] if has_research_scenario else None,
+            "scenario_entry_low": (row["scenario_entry_low"]
+                                   if has_research_scenario else None),
+            "scenario_entry_high": (row["scenario_entry_high"]
+                                    if has_research_scenario else None),
+            "scenario_stop": row["scenario_stop"] if has_research_scenario else None,
+            "scenario_take_profit_1": (row["scenario_take_profit_1"]
+                                       if has_research_scenario else None),
+            "scenario_take_profit_2": (row["scenario_take_profit_2"]
+                                       if has_research_scenario else None),
             "settlement_status": "已結算" if settled else "等待結算",
             "actual_close": row["actual_close"] if settled else None,
             "actual_return_pct": (row["actual_return"] if settled and actionable else None),
@@ -77,7 +120,7 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
         "limit": limit,
         "count": len(records),
         "disclaimer": DISCLAIMER,
-        "privacy": "僅公開查詢必要欄位及原始交易價位；不包含 SQLite、技術指標 snapshot 或內部推理。",
+        "privacy": "僅公開查詢必要欄位、正式交易價位及明確標示不可交易的研究情境；不包含 SQLite、技術指標 snapshot 或內部推理。",
         "records": records,
     }
 

@@ -384,6 +384,44 @@ CREATE TABLE IF NOT EXISTS prediction\_outcomes (
 
 );
 
+CREATE TABLE IF NOT EXISTS prediction\_research\_scenarios (
+
+    prediction\_id              INTEGER PRIMARY KEY REFERENCES predictions(id),
+
+    raw\_estimated\_price        REAL NOT NULL,
+
+    raw\_estimated\_price\_low    REAL NOT NULL,
+
+    raw\_estimated\_price\_high   REAL NOT NULL,
+
+    scenario\_entry             REAL NOT NULL,
+
+    scenario\_entry\_low         REAL NOT NULL,
+
+    scenario\_entry\_high        REAL NOT NULL,
+
+    scenario\_stop              REAL NOT NULL,
+
+    scenario\_take\_profit\_1     REAL NOT NULL,
+
+    scenario\_take\_profit\_2     REAL NOT NULL,
+
+    validated                  INTEGER NOT NULL CHECK(validated IN (0,1)),
+
+    not\_actionable             INTEGER NOT NULL CHECK(not\_actionable = 1),
+
+    warning                    TEXT NOT NULL,
+
+    failed\_validations         TEXT NOT NULL,
+
+    assumptions                TEXT NOT NULL,
+
+    valid\_until                TEXT NOT NULL,
+
+    created\_at                 TEXT NOT NULL
+
+);
+
 CREATE TRIGGER IF NOT EXISTS prevent\_prediction\_update
 
 BEFORE UPDATE ON predictions
@@ -407,6 +445,7 @@ END;
 \`\`\`
 
 \`predictions\` 為不可修改的原始預測紀錄；\`prediction\_outcomes\` 用於補寫實際結果，不得回寫或覆蓋原始預測。
+\`prediction\_research\_scenarios\` 以 prediction ID 一對一保存未驗證研究情境，必須與原始預測在同一 transaction 新增，不得寫入正式交易欄位或交由 outcome 結算。
 
 **### 3. 寫入完整性**
 
@@ -651,4 +690,3 @@ git log -1 --oneline
 ```
 
 如本地端或執行環境版本不是最新 push 的 commit，不得宣稱已使用最新模型、策略或 `AGENTS.md` 規則。
-

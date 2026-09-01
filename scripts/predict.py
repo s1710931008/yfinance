@@ -989,7 +989,7 @@ def clean_json(value):
 MODEL_VERSION = "20260828.4"
 CANDIDATE_B_MODEL_VERSION = "20260901.1"
 STRATEGY_VERSION = "20260901.2"
-DATABASE_SCHEMA_VERSION = "20260831.1"
+DATABASE_SCHEMA_VERSION = "20260902.1"
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
@@ -1167,6 +1167,27 @@ def _create_prediction_schema(con: sqlite3.Connection) -> None:
             prediction_success INTEGER CHECK(prediction_success IN (0,1)),
             resolved_at TEXT NOT NULL, UNIQUE(prediction_id)
         )""",
+        """CREATE TABLE IF NOT EXISTS prediction_research_scenarios (
+            prediction_id INTEGER PRIMARY KEY REFERENCES predictions(id),
+            raw_estimated_price REAL NOT NULL,
+            raw_estimated_price_low REAL NOT NULL,
+            raw_estimated_price_high REAL NOT NULL,
+            scenario_entry REAL NOT NULL,
+            scenario_entry_low REAL NOT NULL,
+            scenario_entry_high REAL NOT NULL,
+            scenario_stop REAL NOT NULL,
+            scenario_take_profit_1 REAL NOT NULL,
+            scenario_take_profit_2 REAL NOT NULL,
+            validated INTEGER NOT NULL CHECK(validated IN (0,1)),
+            not_actionable INTEGER NOT NULL CHECK(not_actionable = 1),
+            warning TEXT NOT NULL,
+            failed_validations TEXT NOT NULL,
+            assumptions TEXT NOT NULL,
+            valid_until TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (
+                strftime('%Y-%m-%dT%H:%M:%S', 'now', '+8 hours') || '+08:00'
+            )
+        )""",
         """CREATE TRIGGER IF NOT EXISTS prevent_prediction_update
         BEFORE UPDATE ON predictions BEGIN
             SELECT RAISE(ABORT, '原始預測紀錄不得修改，請新增一筆紀錄');
@@ -1174,6 +1195,14 @@ def _create_prediction_schema(con: sqlite3.Connection) -> None:
         """CREATE TRIGGER IF NOT EXISTS prevent_prediction_delete
         BEFORE DELETE ON predictions BEGIN
             SELECT RAISE(ABORT, '原始預測紀錄不得刪除');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS prevent_research_scenario_update
+        BEFORE UPDATE ON prediction_research_scenarios BEGIN
+            SELECT RAISE(ABORT, '原始研究情境紀錄不得修改');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS prevent_research_scenario_delete
+        BEFORE DELETE ON prediction_research_scenarios BEGIN
+            SELECT RAISE(ABORT, '原始研究情境紀錄不得刪除');
         END""",
     )
     for statement in statements:
@@ -1373,6 +1402,27 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
              json.dumps(clean_json(source), ensure_ascii=False), reason,
              _market_state_zh(latest.get("regime", "unknown"))))
         prediction_id = int(cur.lastrowid)
+        scenario = result.get("research_scenario") or {}
+        if scenario.get("available"):
+            con.execute("""INSERT INTO prediction_research_scenarios (
+                prediction_id,raw_estimated_price,raw_estimated_price_low,
+                raw_estimated_price_high,scenario_entry,scenario_entry_low,
+                scenario_entry_high,scenario_stop,scenario_take_profit_1,
+                scenario_take_profit_2,validated,not_actionable,warning,
+                failed_validations,assumptions,valid_until)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (prediction_id, scenario["raw_estimated_price"],
+                 scenario["raw_estimated_price_low"],
+                 scenario["raw_estimated_price_high"], scenario["scenario_entry"],
+                 scenario["scenario_entry_low"], scenario["scenario_entry_high"],
+                 scenario["scenario_stop"], scenario["scenario_take_profit_1"],
+                 scenario["scenario_take_profit_2"], int(bool(scenario.get("validated"))),
+                 1, scenario["warning"],
+                 json.dumps(clean_json(scenario.get("failed_validations", [])),
+                            ensure_ascii=False),
+                 json.dumps(clean_json(scenario.get("assumptions", {})),
+                            ensure_ascii=False),
+                 scenario.get("valid_until") or result["valid_until"]))
         con.commit()
     except Exception:
         con.rollback()

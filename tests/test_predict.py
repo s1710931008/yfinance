@@ -381,10 +381,19 @@ def test_unvalidated_scenario_never_populates_official_sqlite_levels(tmp_path):
         "strategy_version": "20260901.2", "data_source_snapshot": {},
         "validation_snapshot": {"passed": False},
         "research_scenario": {
-            "available": True, "not_actionable": True,
-            "scenario_entry": 100.0, "scenario_stop": 97.0,
+            "available": True, "validated": False, "not_actionable": True,
+            "warning": "未驗證研究情境；不可交易",
+            "raw_estimated_price": 105.0,
+            "raw_estimated_price_low": 95.0,
+            "raw_estimated_price_high": 115.0,
+            "scenario_entry": 100.0,
+            "scenario_entry_low": 99.5, "scenario_entry_high": 100.5,
+            "scenario_stop": 97.0,
             "scenario_take_profit_1": 103.0,
             "scenario_take_profit_2": 107.5,
+            "failed_validations": ["formal_validation"],
+            "assumptions": {"stop_atr": 1.5},
+            "valid_until": "2026-09-08",
         },
         "oos_trading": {"win_rate": .5},
         "execution_plan": {
@@ -403,9 +412,18 @@ def test_unvalidated_scenario_never_populates_official_sqlite_levels(tmp_path):
         row = con.execute("""SELECT action,buy_price,buy_range_low,buy_range_high,
             stop_loss,take_profit_1,take_profit_2,validation_snapshot
             FROM predictions WHERE id=?""", (prediction_id,)).fetchone()
+        research = con.execute("""SELECT scenario_entry,scenario_stop,
+            scenario_take_profit_1,scenario_take_profit_2,not_actionable
+            FROM prediction_research_scenarios WHERE prediction_id=?""",
+            (prediction_id,)).fetchone()
     assert row[:7] == ("不交易", None, None, None, None, None, None)
     snapshot = json.loads(row[7])
     assert snapshot["research_scenario"]["not_actionable"]
+    assert research == (100.0, 97.0, 103.0, 107.5, 1)
+    with sqlite3.connect(database) as con:
+        with np.testing.assert_raises_regex(sqlite3.IntegrityError, "不得修改"):
+            con.execute("""UPDATE prediction_research_scenarios
+                SET scenario_entry=1 WHERE prediction_id=?""", (prediction_id,))
 
 
 def test_legacy_database_migration_preserves_rows_and_makes_predictions_immutable(tmp_path):
@@ -438,6 +456,8 @@ def test_legacy_database_migration_preserves_rows_and_makes_predictions_immutabl
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert con.execute("SELECT count(*) FROM predictions").fetchone()[0] == 1
         assert con.execute("SELECT count(*) FROM prediction_outcomes").fetchone()[0] == 1
+        assert con.execute(
+            "SELECT count(*) FROM prediction_research_scenarios").fetchone()[0] == 0
         assert con.execute("SELECT symbol FROM predictions").fetchone()[0] == "00631L"
         with np.testing.assert_raises_regex(sqlite3.IntegrityError, "不得修改"):
             con.execute("UPDATE predictions SET market_price=1 WHERE id=1")

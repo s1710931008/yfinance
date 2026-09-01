@@ -22,6 +22,13 @@ def make_database(path):
         con.execute("""CREATE TABLE prediction_outcomes (
             id INTEGER PRIMARY KEY, prediction_id INTEGER, actual_close REAL,
             actual_return_pct REAL, prediction_success INTEGER, resolved_at TEXT)""")
+        con.execute("""CREATE TABLE prediction_research_scenarios (
+            prediction_id INTEGER PRIMARY KEY, raw_estimated_price REAL,
+            raw_estimated_price_low REAL, raw_estimated_price_high REAL,
+            scenario_entry REAL, scenario_entry_low REAL, scenario_entry_high REAL,
+            scenario_stop REAL, scenario_take_profit_1 REAL,
+            scenario_take_profit_2 REAL, validated INTEGER,
+            not_actionable INTEGER, warning TEXT)""")
         con.executemany("INSERT INTO predictions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", [
             (1, "2026-08-18T16:30:00+08:00", 34.81, "不交易", .33,
              "2026-08-25", "m1", "s1", None, None, None, None, None, None,
@@ -32,6 +39,9 @@ def make_database(path):
         ])
         con.execute("INSERT INTO prediction_outcomes VALUES (?,?,?,?,?,?)",
                     (1, 1, 36.0, .03, None, "2026-08-25T16:30:00+08:00"))
+        con.execute("INSERT INTO prediction_research_scenarios VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (1, 35.4, 32.0, 38.8, 34.8, 34.5, 35.1, 33.2,
+                     36.4, 38.8, 0, 1, "未驗證研究情境；不可交易"))
 
 
 def test_export_history_is_sanitized_and_newest_first(tmp_path):
@@ -53,8 +63,22 @@ def test_export_history_is_sanitized_and_newest_first(tmp_path):
     assert no_trade["trade_levels_available"] is False
     assert no_trade["suggested_entry"] is None
     assert no_trade["stop_price"] is None
+    assert no_trade["research_scenario_available"] is True
+    assert no_trade["research_not_actionable"] is True
+    assert no_trade["scenario_entry"] == 34.8
+    assert no_trade["scenario_stop"] == 33.2
+    assert no_trade["scenario_take_profit_2"] == 38.8
     assert "disclaimer" in payload
     assert "indicators_json" not in no_trade
+
+
+def test_export_history_supports_database_without_research_table(tmp_path):
+    database = tmp_path / "legacy.sqlite3"
+    make_database(database)
+    with sqlite3.connect(database) as con:
+        con.execute("DROP TABLE prediction_research_scenarios")
+    payload = export_history.export_history(str(database), 30)
+    assert all(not row["research_scenario_available"] for row in payload["records"])
 
 
 def test_export_history_limit_validation(tmp_path):
