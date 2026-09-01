@@ -26,7 +26,7 @@
 
 ### Validation
 
-- `research_scenario` 數值計算、無效輸入關閉、正式 action／execution plan／SQLite 隔離、Page 顯示與完整 B Walk-Forward／Final Test 不變性：待驗證。
+- `research_scenario` 已通過 34 項本機測試、Page 欄位與 JavaScript 語法檢查、無效輸入關閉、正式 action／execution plan／SQLite 隔離及 `PRAGMA integrity_check`。實際 B `--period max --no-record` 執行成功：正式 action 為「不交易」、signal 為 false，正式買進價／區間／停損／兩段停利及臨時 SQLite 對應欄位均為 `NULL`；研究情境獨立保存於 validation snapshot。與修改前 B 比較，OOS 交易統計、Final Test、正式驗證及交易門檻逐項一致，確認本變更不影響模型或交易績效。
 - 候選 B 已通過 31 項本機測試，包含扣成本交易標籤、同日停損優先、開盤未成交聯合事件與末 5 日未知結果。A／B 使用相同 2014-11-11～2024-04-16 開發期及相同 Final Test 重跑：A OOS 56 筆、勝率 48.2%、EV_R -0.168、PF 0.652、回撤 20.1%；B OOS 66 筆、勝率 50.0%、EV_R -0.035、PF 0.911、回撤 15.7%。B Final Test 43 筆、勝率 67.4%、EV_R 0.433、PF 2.678、回撤 7.8%。B 雖改善 A，但 OOS EV_R 仍為負、PF 未達 1.2、OOS／Final Test 勝率差超過 10 個百分點，且多重驗證雙倍成本中位 EV_R -0.116、PF 0.765，因此正式驗證與嚴格進場驗證均未通過。候選 B 保留研究，不啟用為正式建議版本。
 - 05:00 排程已通過 YAML 解析、排程與時區靜態檢查；GitHub 實際觸發時間待推送後的下一個平日觀察。
 - SQLite `20260831.1` 已通過 29 項本機測試、舊資料庫副本遷移、SQLite 一致性備份、UPDATE／DELETE trigger、foreign key check、`PRAGMA integrity_check`、公開歷史匯出與 workflow YAML 驗證。正式資料庫舊 2 筆預測均保留，已將 2 筆到期結果新增至 `prediction_outcomes`，並成功新增 2026-08-31 的 prediction ID 5；備份為 `predictions.sqlite3.legacy-20260831T222748+0800.bak`。

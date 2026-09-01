@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import sys
@@ -369,6 +370,42 @@ def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path
             str(tmp_path / "predictions.sqlite3"), result, pd.Series(),
             pd.DataFrame(), SimpleNamespace())
     assert not (tmp_path / "predictions.sqlite3").exists()
+
+
+def test_unvalidated_scenario_never_populates_official_sqlite_levels(tmp_path):
+    database = tmp_path / "predictions.sqlite3"
+    result = {
+        "latest_price": 100.0, "latest_date": "2026-09-01",
+        "signal": False, "action": "不交易", "latest_probability": .3,
+        "valid_until": "2026-09-08", "model_version": "20260901.1",
+        "strategy_version": "20260901.2", "data_source_snapshot": {},
+        "validation_snapshot": {"passed": False},
+        "research_scenario": {
+            "available": True, "not_actionable": True,
+            "scenario_entry": 100.0, "scenario_stop": 97.0,
+            "scenario_take_profit_1": 103.0,
+            "scenario_take_profit_2": 107.5,
+        },
+        "oos_trading": {"win_rate": .5},
+        "execution_plan": {
+            "suggested_entry": 100.0, "entry_low": 99.5,
+            "entry_high": 100.5, "tranches": [],
+            "position_sizing_denominator": "配置給 00631L 的資金",
+            "stop": 97.0, "take_profit_1": 103.0,
+            "take_profit_2": 107.5, "reward_risk_2": 2.5,
+        },
+    }
+    prediction_id = predict.record_prediction(
+        str(database), result, pd.Series(dtype=float),
+        pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]),
+        SimpleNamespace())
+    with sqlite3.connect(database) as con:
+        row = con.execute("""SELECT action,buy_price,buy_range_low,buy_range_high,
+            stop_loss,take_profit_1,take_profit_2,validation_snapshot
+            FROM predictions WHERE id=?""", (prediction_id,)).fetchone()
+    assert row[:7] == ("不交易", None, None, None, None, None, None)
+    snapshot = json.loads(row[7])
+    assert snapshot["research_scenario"]["not_actionable"]
 
 
 def test_legacy_database_migration_preserves_rows_and_makes_predictions_immutable(tmp_path):
