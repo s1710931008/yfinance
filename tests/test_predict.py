@@ -128,16 +128,17 @@ def test_research_price_forecast_is_independent_of_trading_gate():
     assert np.isclose(forecast["predicted_price_high"], 110)
 
 
-def test_research_price_forecast_hides_prices_when_validation_fails():
+def test_research_price_forecast_keeps_prices_and_marks_failed_validation():
     passed = {"passed": True}
     failed = {"passed": False}
     forecast = predict.research_price_forecast(
         100, .05, -.02, .10, 5, "2026-09-04", passed, failed)
-    assert not forecast["available"]
-    assert forecast["predicted_price"] is None
-    assert forecast["predicted_price_low"] is None
-    assert forecast["predicted_price_high"] is None
-    assert "價格模型自身驗證未通過" in forecast["unavailable_reason"]
+    assert forecast["available"]
+    assert forecast["predicted_price"] == 105
+    assert forecast["predicted_price_low"] == 98
+    assert np.isclose(forecast["predicted_price_high"], 110)
+    assert not forecast["validation_passed"]
+    assert "研究參考" in forecast["validation_status"]
 
 
 def test_unvalidated_research_scenario_is_numeric_but_not_actionable():
@@ -177,6 +178,21 @@ def test_research_return_model_does_not_read_test_outcomes():
     np.testing.assert_allclose(first[1], second[1])
     np.testing.assert_allclose(first[2], second[2])
     assert first[3]["selection_scope"].startswith("僅使用")
+
+
+def test_research_model_uses_rolling_window_and_nested_intervals():
+    rng = np.random.default_rng(7)
+    train = pd.DataFrame({
+        "x": rng.normal(size=1400),
+        "future_return": rng.normal(scale=.03, size=1400),
+    })
+    test = pd.DataFrame({"x": [-1., 0., 1.]})
+    _, low, high, metadata = predict.research_return_fit_predict(train, test, ["x"])
+    assert metadata["available_training_samples"] == 1400
+    assert metadata["rolling_training_samples"] == predict.RESEARCH_TRAIN_WINDOW
+    assert metadata["conformal_radius_50"] <= metadata["conformal_radius"]
+    assert metadata["selected_model"] in predict.RESEARCH_RETURN_CANDIDATES
+    assert (low <= high).all()
 
 
 def test_same_bar_stop_and_target_is_conservative():
@@ -240,13 +256,44 @@ def test_metrics_compounded_drawdown_percentage():
     assert round(metrics["max_drawdown_pct"], 3) == .20
 
 
+def test_probability_metrics_compare_with_unconditional_baseline():
+    rows = pd.DataFrame({"probability": [.1, .2, .8, .9], "label": [0, 0, 1, 1]})
+    metrics = predict.probability_metrics(rows, .5)
+    assert metrics["base_rate"] == .5
+    assert metrics["baseline_brier"] == .25
+    assert metrics["brier_skill_score"] > 0
+
+
+def test_return_metrics_reject_one_sided_direction_predictions():
+    rows = pd.DataFrame({
+        "future_return": [-.04, -.02, .01, .03],
+        "research_predicted_return": [.01, .01, .01, .01],
+        "research_predicted_return_low": [-.05] * 4,
+        "research_predicted_return_high": [.05] * 4,
+    })
+    metrics = predict.return_forecast_metrics(rows, "research_predicted_return")
+    assert metrics["direction_accuracy"] == .5
+    assert metrics["balanced_direction_accuracy"] == .5
+    assert not metrics["passed"]
+
+
+def test_bootstrap_ev_interval_is_reproducible_and_ordered():
+    trades = [predict.Trade("", "", "", 1, 1, .8, r, r, "time", "bull")
+              for r in [1.0, -.5, .25]]
+    first = predict.bootstrap_ev_interval(trades, samples=200)
+    second = predict.bootstrap_ev_interval(trades, samples=200)
+    assert first == second
+    assert first["lower_90"] <= first["median"] <= first["upper_90"]
+
+
 def test_formal_validation_requires_all_mandatory_gates(monkeypatch):
     def fake_simulate(rows, *_args, **_kwargs):
         return [predict.Trade("", "", "", 1, 1, .8, r, r, "time", "bull", r / 100)
                 for r in ([1.0] * 6 + [-.5] * 4)]
 
     monkeypatch.setattr(predict, "simulate", fake_simulate)
-    rows = pd.DataFrame({"fold": [1, 2, 3]})
+    rows = pd.DataFrame({"fold": [1, 2, 3], "probability": [.1, .2, .9],
+                         "label": [0, 0, 1]})
     args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
                            commission_bps=14.25, tax_bps=10, slippage_bps=5,
                            entry_gap_low_atr=.15, entry_gap_high_atr=.55)
@@ -265,7 +312,7 @@ def test_formal_validation_rejects_empty_walk_forward_fold(monkeypatch):
         return [predict.Trade("", "", "", 1, 1, .8, 1, 1, "time", "bull", .01)]
 
     monkeypatch.setattr(predict, "simulate", fake_simulate)
-    rows = pd.DataFrame({"fold": [1, 2]})
+    rows = pd.DataFrame({"fold": [1, 2], "probability": [.1, .9], "label": [0, 1]})
     args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
                            commission_bps=14.25, tax_bps=10, slippage_bps=5,
                            entry_gap_low_atr=.15, entry_gap_high_atr=.55)
@@ -285,7 +332,7 @@ def test_formal_validation_enforces_24_9pct_drawdown_limit(monkeypatch):
             predict.Trade("", "", "", 1, 1, .8, 1, 1, "time", "bull", .01)
         ],
     )
-    rows = pd.DataFrame({"fold": [1, 2]})
+    rows = pd.DataFrame({"fold": [1, 2], "probability": [.1, .9], "label": [0, 1]})
     args = SimpleNamespace(threshold=.2, horizon=5, stop_atr=1.5, reward_risk=2,
                            commission_bps=14.25, tax_bps=10, slippage_bps=5,
                            entry_gap_low_atr=.15, entry_gap_high_atr=.55)
@@ -372,7 +419,7 @@ def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path
     assert not (tmp_path / "predictions.sqlite3").exists()
 
 
-def test_unvalidated_scenario_never_populates_official_sqlite_levels(tmp_path):
+def test_unvalidated_scenario_records_levels_but_keeps_action_not_trading(tmp_path):
     database = tmp_path / "predictions.sqlite3"
     result = {
         "latest_price": 100.0, "latest_date": "2026-09-01",
@@ -409,15 +456,15 @@ def test_unvalidated_scenario_never_populates_official_sqlite_levels(tmp_path):
         pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]),
         SimpleNamespace())
     with sqlite3.connect(database) as con:
-        row = con.execute("""SELECT action,buy_price,buy_range_low,buy_range_high,
+        row = con.execute("""SELECT action,predicted_price,buy_price,buy_range_low,buy_range_high,
             stop_loss,take_profit_1,take_profit_2,validation_snapshot
             FROM predictions WHERE id=?""", (prediction_id,)).fetchone()
         research = con.execute("""SELECT scenario_entry,scenario_stop,
             scenario_take_profit_1,scenario_take_profit_2,not_actionable
             FROM prediction_research_scenarios WHERE prediction_id=?""",
             (prediction_id,)).fetchone()
-    assert row[:7] == ("不交易", None, None, None, None, None, None)
-    snapshot = json.loads(row[7])
+    assert row[:8] == ("不交易", 105.0, 100.0, 99.5, 100.5, 97.0, 103.0, 107.5)
+    snapshot = json.loads(row[8])
     assert snapshot["research_scenario"]["not_actionable"]
     assert research == (100.0, 97.0, 103.0, 107.5, 1)
     with sqlite3.connect(database) as con:

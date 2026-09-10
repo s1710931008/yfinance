@@ -25,11 +25,30 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import ExtraTreesClassifier, ExtraTreesRegressor
+from sklearn.ensemble import (ExtraTreesClassifier, ExtraTreesRegressor,
+                              HistGradientBoostingClassifier,
+                              HistGradientBoostingRegressor)
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+
+try:
+    from strategy_config import (COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+                                 ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
+                                 FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
+                                 MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
+                                 RESEARCH_MODEL_VERSION, RESEARCH_TRAIN_WINDOW,
+                                 SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
+                                 TAX_BPS, THRESHOLD)
+except ModuleNotFoundError:  # imported as scripts.predict by tests and library callers
+    from scripts.strategy_config import (COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+                                         ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
+                                         FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
+                                         MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
+                                         RESEARCH_MODEL_VERSION, RESEARCH_TRAIN_WINDOW,
+                                         SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
+                                         TAX_BPS, THRESHOLD)
 
 
 @dataclass
@@ -52,37 +71,39 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("ticker", help="Yahoo Finance symbol, e.g. 00631L.TW")
     p.add_argument("--period", default="10y")
-    p.add_argument("--horizon", type=int, default=5)
+    p.add_argument("--horizon", type=int, default=HORIZON)
     p.add_argument("--target", type=float, default=0.04)
     p.add_argument("--adverse", type=float, default=-0.025)
     p.add_argument("--threshold", type=float,
                    help="Signal threshold; defaults to 0.22 for ExtraTrees and 0.70 for Logistic")
     p.add_argument("--folds", type=int, default=5)
-    p.add_argument("--final-test", type=float, default=0.20,
+    p.add_argument("--final-test", type=float, default=FINAL_TEST_FRACTION,
                    help="Chronological untouched fraction (0.10-0.40)")
-    p.add_argument("--stop-atr", type=float, default=1.5)
-    p.add_argument("--reward-risk", type=float, default=2.0)
-    p.add_argument("--entry-gap-low-atr", type=float, default=0.15,
+    p.add_argument("--stop-atr", type=float, default=STOP_ATR)
+    p.add_argument("--reward-risk", type=float, default=REWARD_RISK)
+    p.add_argument("--entry-gap-low-atr", type=float, default=ENTRY_GAP_LOW_ATR,
                    help="Minimum next-open displacement from signal close, in ATR; negative allows a gap down (default: 0.15)")
-    p.add_argument("--entry-gap-high-atr", type=float, default=0.55,
+    p.add_argument("--entry-gap-high-atr", type=float, default=ENTRY_GAP_HIGH_ATR,
                    help="Maximum next-open displacement from signal close, in ATR (default: 0.55)")
-    p.add_argument("--commission-bps", type=float, default=14.25,
+    p.add_argument("--commission-bps", type=float, default=COMMISSION_BPS,
                    help="Commission per side in basis points")
-    p.add_argument("--tax-bps", type=float, default=10.0,
+    p.add_argument("--tax-bps", type=float, default=TAX_BPS,
                    help="Sell-side transaction tax in basis points")
-    p.add_argument("--slippage-bps", type=float, default=5.0,
+    p.add_argument("--slippage-bps", type=float, default=SLIPPAGE_BPS,
                    help="Slippage per side in basis points")
     p.add_argument("--context", nargs="*", default=["2330.TW", "^TWII"],
                    help="Context symbols; unavailable symbols are reported and skipped")
+    p.add_argument("--research-context", nargs="*", default=["0050.TW"],
+                   help="Extra context used only by research price forecasts")
     p.add_argument("--futures-symbol",
                    help="Optional Yahoo-compatible continuous futures symbol (Taiwan WTX codes are not exposed by yfinance)")
-    p.add_argument("--min-train", type=int, default=252)
+    p.add_argument("--min-train", type=int, default=MIN_TRAIN)
     p.add_argument("--feature-set", choices=["baseline", "all"], default="all",
                    help="all is the AGENTS.md default; baseline is retained for comparison")
     p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees",
                    help="Prediction model (default: extra-trees experimental candidate)")
     p.add_argument("--label-mode", choices=["legacy-target", "trade-outcome"],
-                   default="trade-outcome",
+                   default=LABEL_MODE,
                    help="Classifier target; trade-outcome is daily default B")
     p.add_argument("--output-json", help="Optional path for machine-readable results")
     p.add_argument("--database", default="predictions.sqlite3",
@@ -416,6 +437,12 @@ def return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
 
 RESEARCH_RETURN_CANDIDATES = (
     "zero", "historical_mean", "ridge",
+    "direction_logistic_shrink_0.10", "direction_logistic_shrink_0.25",
+    "direction_logistic_shrink_0.50", "direction_hgb_shrink_0.10",
+    "direction_hgb_shrink_0.25", "direction_hgb_shrink_0.50",
+    "hist_gradient_boosting_shrink_0.25", "hist_gradient_boosting_shrink_0.50",
+    "hist_gradient_boosting_shrink_0.75", "hist_gradient_boosting_shrink_1.00",
+    "ensemble_ridge_extra_hgb",
     "extra_trees_shrink_0.10", "extra_trees_shrink_0.25",
     "extra_trees_shrink_0.50", "extra_trees_shrink_0.75",
     "extra_trees_shrink_1.00",
@@ -426,7 +453,8 @@ def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
                                 features: list[str]) -> tuple[np.ndarray, np.ndarray,
                                                               np.ndarray, dict[str, object]]:
     """Select a research-only centre on trailing calibration data and conformalize it."""
-    usable = train.dropna(subset=["future_return"])
+    all_usable = train.dropna(subset=["future_return"])
+    usable = all_usable.iloc[-RESEARCH_TRAIN_WINDOW:]
     if len(usable) < 100:
         raise RuntimeError("insufficient known returns for research price model")
     split = max(int(len(usable) * 0.8), len(usable) - 126)
@@ -449,21 +477,85 @@ def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
 
     ridge = Ridge(alpha=10.0)
     ridge.fit(x_fit, y_fit)
+    hgb = HistGradientBoostingRegressor(
+        loss="absolute_error", learning_rate=0.04, max_iter=180,
+        max_leaf_nodes=15, min_samples_leaf=20, l2_regularization=1.0,
+        random_state=45)
+    hgb.fit(x_fit, y_fit)
+    ridge_cal, ridge_test = ridge.predict(x_cal), ridge.predict(x_test)
+    hgb_cal, hgb_test = hgb.predict(x_cal), hgb.predict(x_test)
     mean_return = float(np.mean(y_fit))
     calibration_candidates: dict[str, np.ndarray] = {
         "zero": np.zeros(len(calibration)),
         "historical_mean": np.full(len(calibration), mean_return),
-        "ridge": ridge.predict(x_cal),
+        "ridge": ridge_cal,
     }
     test_candidates: dict[str, np.ndarray] = {
         "zero": np.zeros(len(test)),
         "historical_mean": np.full(len(test), mean_return),
-        "ridge": ridge.predict(x_test),
+        "ridge": ridge_test,
     }
+
+    def balanced_sign_score(actual_values: np.ndarray,
+                            predictions: np.ndarray) -> float:
+        actual_positive = actual_values > 0
+        predicted_positive = predictions > 0
+        if not actual_positive.any() or not (~actual_positive).any():
+            return 0.5
+        sensitivity = predicted_positive[actual_positive].mean()
+        specificity = (~predicted_positive[~actual_positive]).mean()
+        return float((sensitivity + specificity) / 2)
+
+    def calibrated_direction_predictions(prob_cal: np.ndarray, prob_test: np.ndarray,
+                                         magnitude: float) -> tuple[np.ndarray, np.ndarray, float]:
+        thresholds = np.linspace(0.35, 0.65, 31)
+        scored = [
+            (balanced_sign_score(y_cal, np.where(prob_cal >= threshold, magnitude, -magnitude)),
+             -abs(threshold - 0.5), threshold)
+            for threshold in thresholds
+        ]
+        threshold = max(scored)[2]
+        return (np.where(prob_cal >= threshold, magnitude, -magnitude),
+                np.where(prob_test >= threshold, magnitude, -magnitude), float(threshold))
+
+    direction_y = (y_fit > 0).astype(int)
+    direction_logistic = LogisticRegression(
+        C=0.25, class_weight="balanced", max_iter=2000, random_state=46)
+    direction_logistic.fit(x_fit, direction_y)
+    direction_hgb = HistGradientBoostingClassifier(
+        learning_rate=0.04, max_iter=180, max_leaf_nodes=15,
+        min_samples_leaf=20, l2_regularization=1.0, random_state=47)
+    class_counts = np.bincount(direction_y, minlength=2)
+    class_weights = np.where(class_counts > 0, len(direction_y) / (2 * class_counts), 1.0)
+    direction_hgb.fit(x_fit, direction_y, sample_weight=class_weights[direction_y])
+    direction_probabilities = {
+        "direction_logistic": (direction_logistic.predict_proba(x_cal)[:, 1],
+                               direction_logistic.predict_proba(x_test)[:, 1]),
+        "direction_hgb": (direction_hgb.predict_proba(x_cal)[:, 1],
+                          direction_hgb.predict_proba(x_test)[:, 1]),
+    }
+    direction_thresholds: dict[str, float] = {}
+    typical_magnitude = float(np.median(np.abs(y_fit)))
+    for family, (prob_cal, prob_test) in direction_probabilities.items():
+        base_cal, base_test, threshold = calibrated_direction_predictions(
+            prob_cal, prob_test, typical_magnitude)
+        direction_thresholds[family] = threshold
+        for shrink in (0.10, 0.25, 0.50):
+            name = f"{family}_shrink_{shrink:.2f}"
+            calibration_candidates[name] = base_cal * shrink
+            test_candidates[name] = base_test * shrink
     for shrink in (0.10, 0.25, 0.50, 0.75, 1.00):
         name = f"extra_trees_shrink_{shrink:.2f}"
         calibration_candidates[name] = extra_cal * shrink
         test_candidates[name] = extra_test * shrink
+    for shrink in (0.25, 0.50, 0.75, 1.00):
+        name = f"hist_gradient_boosting_shrink_{shrink:.2f}"
+        calibration_candidates[name] = hgb_cal * shrink
+        test_candidates[name] = hgb_test * shrink
+    calibration_candidates["ensemble_ridge_extra_hgb"] = (
+        ridge_cal + extra_cal + hgb_cal) / 3
+    test_candidates["ensemble_ridge_extra_hgb"] = (
+        ridge_test + extra_test + hgb_test) / 3
 
     calibration_mae = {
         name: float(np.mean(np.abs(y_cal - prediction)))
@@ -473,9 +565,14 @@ def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
         name: float(np.mean(np.sign(y_cal) == np.sign(prediction)))
         for name, prediction in calibration_candidates.items()
     }
+    calibration_balanced_direction = {
+        name: balanced_sign_score(y_cal, prediction)
+        for name, prediction in calibration_candidates.items()
+    }
     direction_qualified = [
         name for name in RESEARCH_RETURN_CANDIDATES
-        if calibration_direction[name] >= 0.52
+        if calibration_direction[name] >= 0.50
+        and calibration_balanced_direction[name] >= 0.52
     ]
     selection_pool = direction_qualified or list(RESEARCH_RETURN_CANDIDATES)
     selected = min(selection_pool,
@@ -484,20 +581,34 @@ def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
     selected_test = test_candidates[selected]
     errors = np.abs(y_cal - selected_cal)
     quantile_level = min(1.0, math.ceil((len(errors) + 1) * 0.80) / len(errors))
+    quantile_level_50 = min(1.0, math.ceil((len(errors) + 1) * 0.50) / len(errors))
     try:
         radius = float(np.quantile(errors, quantile_level, method="higher"))
     except TypeError:  # NumPy < 1.22 compatibility.
         radius = float(np.quantile(errors, quantile_level, interpolation="higher"))
+    try:
+        radius_50 = float(np.quantile(errors, quantile_level_50, method="higher"))
+    except TypeError:
+        radius_50 = float(np.quantile(errors, quantile_level_50, interpolation="higher"))
     metadata = {
         "selected_model": selected,
+        "research_model_version": RESEARCH_MODEL_VERSION,
+        "available_training_samples": len(all_usable),
+        "rolling_training_samples": len(usable),
+        "rolling_training_window": RESEARCH_TRAIN_WINDOW,
         "calibration_samples": len(calibration),
         "calibration_mae": calibration_mae[selected],
         "candidate_mae": calibration_mae,
         "calibration_direction_accuracy": calibration_direction[selected],
         "candidate_direction_accuracy": calibration_direction,
-        "direction_constraint": 0.52,
+        "calibration_balanced_direction_accuracy":
+            calibration_balanced_direction[selected],
+        "candidate_balanced_direction_accuracy": calibration_balanced_direction,
+        "direction_probability_thresholds": direction_thresholds,
+        "direction_constraint": {"accuracy": 0.50, "balanced_accuracy": 0.52},
         "conformal_target_coverage": 0.80,
         "conformal_radius": radius,
+        "conformal_radius_50": radius_50,
         "selection_scope": "僅使用該 fold 訓練窗口尾端時間順序校準期",
     }
     return selected_test, selected_test - radius, selected_test + radius, metadata
@@ -704,6 +815,7 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
     win_rate_gap_pp = (abs(float(final_metrics["win_rate"] - oos_metrics["win_rate"])) * 100
                        if final_metrics["win_rate"] is not None
                        and oos_metrics["win_rate"] is not None else None)
+    probability_baseline = probability_metrics(oos_rows, args.threshold)
     checks = {
         "effective_trades_at_least_30": oos_metrics["trades"] >= 30,
         "walk_forward_winrate_std_at_most_15pp":
@@ -717,6 +829,9 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
             win_rate_gap_pp is not None and win_rate_gap_pp <= 10,
         "walk_forward_and_independent_oos_completed":
             bool(fold_metrics) and final_metrics["trades"] > 0,
+        "probability_model_beats_base_rate":
+            (probability_baseline["brier_skill_score"] is not None
+             and probability_baseline["brier_skill_score"] > 0),
     }
     return {
         "passed": all(checks.values()),
@@ -725,6 +840,7 @@ def formal_validation(oos_rows: pd.DataFrame, market: pd.DataFrame,
         "fold_winrate_std_pp": fold_std_pp,
         "all_folds_have_trades": all_folds_have_trades,
         "profit_factor": oos_metrics["profit_factor"],
+        "probability_baseline": probability_baseline,
         "max_drawdown_pct": oos_metrics["max_drawdown_pct"],
         "development_walk_forward_winrate": oos_metrics["win_rate"],
         "independent_oos_winrate": final_metrics["win_rate"],
@@ -957,9 +1073,29 @@ def holding_analysis(shares: int, average_cost: float, latest_close: float,
 
 def probability_metrics(rows: pd.DataFrame, threshold: float) -> dict[str, float | int | None]:
     signal = rows.probability >= threshold
+    labels = rows.label.astype(int)
+    base_rate = float(labels.mean())
+    brier = float(brier_score_loss(labels, rows.probability))
+    baseline_brier = float(brier_score_loss(labels, np.full(len(labels), base_rate)))
     return {"predictions": len(rows), "signals": int(signal.sum()),
             "buy_precision": float(rows.loc[signal, "label"].mean()) if signal.any() else None,
-            "brier": float(brier_score_loss(rows.label.astype(int), rows.probability))}
+            "base_rate": base_rate, "brier": brier,
+            "baseline_brier": baseline_brier,
+            "brier_skill_score": (1 - brier / baseline_brier if baseline_brier > 0 else None)}
+
+
+def bootstrap_ev_interval(trades: list[Trade], samples: int = 2000,
+                          seed: int = 20260908) -> dict[str, float | int | None]:
+    """Deterministic percentile interval for mean net R; diagnostic, not a pass gate."""
+    values = np.asarray([trade.net_r for trade in trades], dtype=float)
+    if not len(values):
+        return {"trades": 0, "samples": samples, "lower_90": None,
+                "median": None, "upper_90": None}
+    rng = np.random.default_rng(seed)
+    means = rng.choice(values, size=(samples, len(values)), replace=True).mean(axis=1)
+    lower, median, upper = np.quantile(means, [0.05, 0.50, 0.95])
+    return {"trades": len(values), "samples": samples, "lower_90": float(lower),
+            "median": float(median), "upper_90": float(upper)}
 
 
 def validated_score(prob: dict, tm: dict, annual: dict, regimes: dict) -> float:
@@ -986,19 +1122,16 @@ def clean_json(value):
     return value
 
 
-MODEL_VERSION = "20260828.4"
-CANDIDATE_B_MODEL_VERSION = "20260901.1"
-STRATEGY_VERSION = "20260901.2"
-DATABASE_SCHEMA_VERSION = "20260902.1"
+CANDIDATE_B_MODEL_VERSION = MODEL_VERSION
 TAIPEI = ZoneInfo("Asia/Taipei")
 
 CANDIDATE_20260819_3 = {
-    "threshold": 0.15,
-    "entry_gap_low_atr": -0.25,
-    "entry_gap_high_atr": 0.25,
-    "stop_atr": 1.5,
-    "reward_risk": 2.5,
-    "minimum_predicted_return": 0.005,
+    "threshold": THRESHOLD,
+    "entry_gap_low_atr": ENTRY_GAP_LOW_ATR,
+    "entry_gap_high_atr": ENTRY_GAP_HIGH_ATR,
+    "stop_atr": STOP_ATR,
+    "reward_risk": REWARD_RISK,
+    "minimum_predicted_return": MINIMUM_PREDICTED_RETURN,
     "selection_scope": "最後15%獨立期間之前的預先限制候選集合",
 }
 
@@ -1040,19 +1173,36 @@ def return_forecast_metrics(rows: pd.DataFrame,
     actual = usable.future_return.to_numpy(dtype=float)
     predicted = usable[prefix].to_numpy(dtype=float)
     mae = float(np.mean(np.abs(actual - predicted)))
+    rmse = float(np.sqrt(np.mean(np.square(actual - predicted))))
     naive = float(np.mean(np.abs(actual)))
+    improvement = float((naive - mae) / naive) if naive > 0 else None
     direction = float(np.mean(np.sign(actual) == np.sign(predicted)))
+    actual_up = actual > 0
+    predicted_up = predicted > 0
+    up_recall = float(predicted_up[actual_up].mean()) if actual_up.any() else None
+    down_recall = float((~predicted_up[~actual_up]).mean()) if (~actual_up).any() else None
+    balanced_direction = ((up_recall + down_recall) / 2
+                          if up_recall is not None and down_recall is not None else None)
     coverage = float(np.mean(
         (actual >= usable[low_col].to_numpy(dtype=float))
         & (actual <= usable[high_col].to_numpy(dtype=float))))
+    average_width = float(np.mean(
+        usable[high_col].to_numpy(dtype=float) - usable[low_col].to_numpy(dtype=float)))
     checks = {
         "samples_at_least_30": len(usable) >= 30,
-        "mae_better_than_zero_baseline": mae <= naive,
+        "mae_at_least_2pct_better_than_zero_baseline":
+            improvement is not None and improvement >= 0.02,
         "direction_accuracy_at_least_52pct": direction >= 0.52,
+        "balanced_direction_accuracy_at_least_52pct":
+            balanced_direction is not None and balanced_direction >= 0.52,
         "interval_coverage_between_60_and_95pct": 0.60 <= coverage <= 0.95,
     }
-    return {"samples": len(usable), "mae": mae, "naive_zero_mae": naive,
-            "direction_accuracy": direction, "interval_80_coverage": coverage,
+    return {"samples": len(usable), "mae": mae, "rmse": rmse,
+            "naive_zero_mae": naive, "mae_improvement_vs_zero": improvement,
+            "direction_accuracy": direction,
+            "balanced_direction_accuracy": balanced_direction,
+            "up_recall": up_recall, "down_recall": down_recall,
+            "interval_80_coverage": coverage, "interval_80_average_width": average_width,
             "checks": checks, "passed": all(checks.values())}
 
 
@@ -1060,13 +1210,15 @@ def research_price_forecast(latest_close: float, predicted_return: float,
                             return_low: float, return_high: float,
                             horizon: int, valid_until: str,
                             development_metrics: dict,
-                            independent_metrics: dict) -> dict[str, object]:
+                            independent_metrics: dict,
+                            model_metadata: dict | None = None) -> dict[str, object]:
     """Expose research prices only when both return-model validations pass."""
     validation_passed = bool(
         development_metrics.get("passed") and independent_metrics.get("passed"))
     finite_inputs = all(np.isfinite(value) for value in (
         latest_close, predicted_return, return_low, return_high))
-    available = bool(validation_passed and finite_inputs and return_low <= return_high)
+    available = bool(finite_inputs and return_low <= return_high)
+    radius_50 = ((model_metadata or {}).get("conformal_radius_50"))
     return {
         "available": available,
         "research_only": True,
@@ -1077,12 +1229,79 @@ def research_price_forecast(latest_close: float, predicted_return: float,
         "predicted_price_low": latest_close * (1 + return_low) if available else None,
         "predicted_price_high": latest_close * (1 + return_high) if available else None,
         "predicted_return": predicted_return if available else None,
+        "predicted_price_low_50": (
+            latest_close * (1 + predicted_return - radius_50)
+            if available and isinstance(radius_50, (int, float)) else None),
+        "predicted_price_high_50": (
+            latest_close * (1 + predicted_return + radius_50)
+            if available and isinstance(radius_50, (int, float)) else None),
+        "model_metadata": model_metadata or {},
         "development_oos": development_metrics,
         "independent_oos": independent_metrics,
         "validation_passed": validation_passed,
-        "unavailable_reason": (None if available else
-                               "價格模型自身驗證未通過，不顯示中央預測價格或區間"),
+        "validation_status": "通過" if validation_passed else "模型未通過驗證／研究參考",
+        "warning": (None if validation_passed else
+                    "價格模型未通過驗證；數值僅供研究參考，不代表可執行交易訊號"),
+        "unavailable_reason": (None if available else "行情或價格計算資料不足"),
     }
+
+
+def research_only_walk_forward(dev: pd.DataFrame, features: list[str], folds: int,
+                               min_train: int, purge: int) -> pd.DataFrame:
+    """Walk-forward return forecasts without fitting or changing the trading classifier."""
+    if len(dev) < min_train + folds * 20:
+        raise RuntimeError("insufficient history for research-only walk-forward")
+    boundaries = np.linspace(min_train, len(dev), folds + 1, dtype=int)
+    outputs = []
+    for fold in range(folds):
+        train = dev.iloc[:max(1, boundaries[fold] - purge)]
+        test = dev.iloc[boundaries[fold]:boundaries[fold + 1]].copy()
+        if test.empty:
+            continue
+        (test["research_predicted_return"], test["research_predicted_return_low"],
+         test["research_predicted_return_high"], metadata) = (
+            research_return_fit_predict(train, test, features))
+        test["research_model"] = metadata["selected_model"]
+        test["fold"] = fold + 1
+        outputs.append(test)
+    if not outputs:
+        raise RuntimeError("research-only walk-forward produced no folds")
+    return pd.concat(outputs).sort_index()
+
+
+def research_horizon_forecast(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
+                              horizon: int, args: argparse.Namespace) -> dict[str, object]:
+    """Evaluate and predict one research horizon without affecting trade signals."""
+    dataset, features = build_dataset(
+        primary, contexts, horizon, args.target, args.adverse, args.feature_set,
+        args.label_mode, args.stop_atr, args.reward_risk, args.commission_bps,
+        args.tax_bps, args.slippage_bps, args.entry_gap_low_atr,
+        args.entry_gap_high_atr)
+    usable = dataset.dropna(subset=["future_return", "ATR"]).copy()
+    cut = int(len(usable) * (1 - args.final_test))
+    dev, independent = usable.iloc[:cut], usable.iloc[cut:].copy()
+    oos = research_only_walk_forward(dev, features, args.folds, args.min_train, horizon)
+    final_train = dev.iloc[:-horizon] if horizon else dev
+    (independent["research_predicted_return"],
+     independent["research_predicted_return_low"],
+     independent["research_predicted_return_high"], independent_meta) = (
+        research_return_fit_predict(final_train, independent, features))
+    latest = dataset.iloc[[-1]].copy()
+    latest_return, latest_low, latest_high, latest_meta = (
+        research_return_fit_predict(usable, latest, features))
+    latest_close = float(latest.Close.iloc[0])
+    valid_until = str((pd.Timestamp(latest.index[0]) + pd.offsets.BDay(horizon)).date())
+    forecast = research_price_forecast(
+        latest_close, float(latest_return[0]), float(latest_low[0]), float(latest_high[0]),
+        horizon, valid_until,
+        return_forecast_metrics(oos, "research_predicted_return"),
+        return_forecast_metrics(independent, "research_predicted_return"), latest_meta)
+    forecast["research_model_version"] = RESEARCH_MODEL_VERSION
+    forecast["development_window"] = [str(dev.index.min().date()), str(dev.index.max().date())]
+    forecast["independent_window"] = [str(independent.index.min().date()),
+                                      str(independent.index.max().date())]
+    forecast["independent_selection"] = independent_meta
+    return forecast
 
 
 def build_research_scenario(latest_close: float, predicted_return: float,
@@ -1139,6 +1358,7 @@ def _create_prediction_schema(con: sqlite3.Connection) -> None:
             timezone TEXT NOT NULL DEFAULT 'Asia/Taipei',
             symbol TEXT NOT NULL CHECK(symbol = '00631L'),
             market_price REAL NOT NULL,
+            predicted_price REAL,
             action TEXT NOT NULL CHECK(action IN ('買進','持有','賣出','不交易')),
             buy_price REAL, buy_range_low REAL, buy_range_high REAL,
             position_sizing TEXT, stop_loss REAL, take_profit_1 REAL,
@@ -1207,6 +1427,9 @@ def _create_prediction_schema(con: sqlite3.Connection) -> None:
     )
     for statement in statements:
         con.execute(statement)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(predictions)")}
+    if "predicted_price" not in columns:
+        con.execute("ALTER TABLE predictions ADD COLUMN predicted_price REAL")
 
 
 def _market_state_zh(regime: object) -> str:
@@ -1379,22 +1602,22 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
                   "正式驗證、機率、交易閘門或嚴格進場驗證未全部通過")
         validation_payload = dict(result["validation_snapshot"])
         validation_payload["research_scenario"] = result.get("research_scenario")
+        predicted_price = (result.get("research_scenario") or {}).get("raw_estimated_price")
         cur = con.execute("""INSERT INTO predictions (
-            predicted_at,timezone,symbol,market_price,action,buy_price,buy_range_low,
+            predicted_at,timezone,symbol,market_price,predicted_price,action,buy_price,buy_range_low,
             buy_range_high,position_sizing,stop_loss,take_profit_1,take_profit_2,
             risk_reward_ratio,model_probability,backtest_winrate,valid_until,
             model_version,strategy_version,indicators_snapshot,validation_snapshot,
             data_source_snapshot,reasoning,market_state)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (dt.datetime.now(TAIPEI).isoformat(), "Asia/Taipei", "00631L", market_price,
-             result["action"], plan["suggested_entry"] if signal else None,
-             plan["entry_low"] if signal else None, plan["entry_high"] if signal else None,
+             predicted_price, result["action"], plan["suggested_entry"],
+             plan["entry_low"], plan["entry_high"],
              json.dumps(clean_json({"tranches": plan.get("tranches", []),
                                     "capital_denominator": plan.get("capital_denominator")}),
                         ensure_ascii=False),
-             plan["stop"] if signal else None, plan["take_profit_1"] if signal else None,
-             plan["take_profit_2"] if signal else None,
-             plan.get("reward_risk_2") if signal else None, result["latest_probability"],
+             plan["stop"], plan["take_profit_1"], plan["take_profit_2"],
+             plan.get("reward_risk_2"), result["latest_probability"],
              result["oos_trading"]["win_rate"], str(result["valid_until"]),
              result["model_version"], result["strategy_version"],
              json.dumps(clean_json(indicators), ensure_ascii=False),
@@ -1447,7 +1670,7 @@ def pct(value) -> str:
 def main() -> int:
     args = parse_args()
     if args.threshold is None:
-        args.threshold = 0.22 if args.model == "extra-trees" else 0.70
+        args.threshold = THRESHOLD if args.model == "extra-trees" else 0.70
     if args.model == "extra-trees" and args.feature_set == "all":
         for name, value in CANDIDATE_20260819_3.items():
             if name != "selection_scope":
@@ -1469,8 +1692,13 @@ def main() -> int:
         validate_entry_gap_atr(args.entry_gap_low_atr, args.entry_gap_high_atr)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    context_symbols = list(args.context) + ([args.futures_symbol] if args.futures_symbol else [])
-    primary, contexts, skipped = download_data(args.ticker, context_symbols, args.period)
+    context_symbols = (list(args.context) + list(args.research_context)
+                       + ([args.futures_symbol] if args.futures_symbol else []))
+    primary, downloaded_contexts, skipped = download_data(args.ticker, context_symbols, args.period)
+    trading_symbols = set(args.context) | ({args.futures_symbol} if args.futures_symbol else set())
+    contexts = {symbol: frame for symbol, frame in downloaded_contexts.items()
+                if symbol in trading_symbols}
+    research_contexts = downloaded_contexts
     data, features = build_dataset(
         primary, contexts, args.horizon, args.target, args.adverse,
         args.feature_set, args.label_mode, args.stop_atr, args.reward_risk,
@@ -1593,28 +1821,39 @@ def main() -> int:
     candidate_risk = args.stop_atr * latest_atr
     valid_until = str((pd.Timestamp(latest.index[0]) + pd.offsets.BDay(args.horizon)).date())
     execution_plan = {
-        "available": executable,
-        "suggested_entry": candidate_entry if executable else None,
-        "entry_low": candidate_low if executable else None,
-        "entry_high": candidate_high if executable else None,
+        "available": True,
+        "actionable": executable,
+        "validation_status": "通過" if executable else "模型未通過驗證／研究參考",
+        "suggested_entry": candidate_entry,
+        "entry_low": candidate_low,
+        "entry_high": candidate_high,
         "tranches": ([{"price": candidate_high,
                         "capital_ratio": latest_position_fraction / 2},
                        {"price": candidate_low,
                         "capital_ratio": latest_position_fraction / 2}]
-                      if executable else []),
+                      ),
         "position_sizing_denominator": "配置給 00631L 的資金",
         "maximum_capital_ratio": latest_position_fraction,
-        "stop": candidate_entry - candidate_risk if executable else None,
-        "take_profit_1": candidate_entry + candidate_risk if executable else None,
-        "take_profit_2": candidate_entry + args.reward_risk * candidate_risk if executable else None,
+        "stop": candidate_entry - candidate_risk,
+        "take_profit_1": candidate_entry + candidate_risk,
+        "take_profit_2": candidate_entry + args.reward_risk * candidate_risk,
         "reward_risk_1": 1.0, "reward_risk_2": args.reward_risk,
-        "condition": "正式驗證、機率、交易閘門、多重驗證及下一交易日開盤區間全部通過",
-        "invalidation": "任一驗證失敗、開盤超出區間、大盤轉空或跌破停損",
+        "condition": "價格以現有行情、ATR 與支撐壓力形成；正式交易仍須機率、交易閘門、多重驗證及下一交易日開盤區間通過",
+        "invalidation": "開盤超出區間、大盤轉空、跌破停損或超過有效期限",
         "valid_until": valid_until,
     }
-    price_forecast = research_price_forecast(
-        latest_close, latest_research_return, latest_research_low, latest_research_high,
-        args.horizon, valid_until, oos_return_forecast, final_return_forecast)
+    multi_horizon_forecasts = {
+        str(horizon): research_horizon_forecast(primary, research_contexts, horizon, args)
+        for horizon in dict.fromkeys((1, 3, args.horizon))
+    }
+    price_forecast = multi_horizon_forecasts[str(args.horizon)]
+    latest_research_return = float(price_forecast["predicted_return"])
+    latest_research_low = float(price_forecast["predicted_price_low"] / latest_close - 1)
+    latest_research_high = float(price_forecast["predicted_price_high"] / latest_close - 1)
+    latest_research_meta = price_forecast["model_metadata"]
+    oos_return_forecast = price_forecast["development_oos"]
+    final_return_forecast = price_forecast["independent_oos"]
+    forecast_validation_passed = bool(price_forecast["validation_passed"])
     research_scenario = build_research_scenario(
         latest_close, latest_research_return, latest_research_low,
         latest_research_high, latest_atr, args.entry_gap_low_atr,
@@ -1649,8 +1888,8 @@ def main() -> int:
         "risk_levels": {"stop_1_5_atr": execution_plan["stop"],
                         "target_2r": execution_plan["take_profit_2"]},
         "entry_plan": {"latest_close_reference": latest_close,
-                       "acceptable_low": candidate_low if executable else None,
-                       "acceptable_high": candidate_high if executable else None,
+                       "acceptable_low": candidate_low,
+                       "acceptable_high": candidate_high,
                        "gap_low_atr": args.entry_gap_low_atr,
                        "gap_high_atr": args.entry_gap_high_atr,
                        "selection_rule": "OOS至少30筆、EV_R>0、PF>=1.2後，以勝率及保留期穩健性選擇",
@@ -1659,6 +1898,7 @@ def main() -> int:
                        "next_open_known": False},
         "execution_plan": execution_plan,
         "price_forecast": price_forecast,
+        "multi_horizon_price_forecasts": multi_horizon_forecasts,
         "research_scenario": research_scenario,
         "candidate_strategy": {"version": STRATEGY_VERSION,
                                "parameters": CANDIDATE_20260819_3,
@@ -1668,12 +1908,15 @@ def main() -> int:
                                    trade_forecast_validation_passed,
                                "activated": executable},
         "research_price_model": {
+            "version": RESEARCH_MODEL_VERSION,
             "candidates": list(RESEARCH_RETURN_CANDIDATES),
             "latest_selection": latest_research_meta,
-            "final_selection": final_research_meta,
+            "final_selection": price_forecast.get("independent_selection", final_research_meta),
             "affects_trading_strategy": False,
         },
-        "context_used": list(contexts), "context_skipped": skipped,
+        "context_used": list(contexts),
+        "research_context_used": list(research_contexts),
+        "context_skipped": skipped,
         "context_alignment": {
             symbol: {"overlap_rows": int(ctx.index.intersection(primary.index).size),
                      "overlap_ratio": float(ctx.index.intersection(primary.index).size / len(primary))}
@@ -1696,6 +1939,11 @@ def main() -> int:
             "passed": trade_forecast_validation_passed,
         },
         "validated_score": validated_score(oos_prob, oos_tm, annual, regimes),
+        "trade_uncertainty": {
+            "development_oos_ev_r": bootstrap_ev_interval(oos_trades),
+            "independent_oos_ev_r": bootstrap_ev_interval(final_trades),
+            "interpretation": "平均每筆淨 R 的 90% bootstrap 百分位區間；不單獨作為通過門檻",
+        },
         "final_test_probability": final_prob, "final_test_trading": final_tm,
         "costs_bps": {"commission_each_side": args.commission_bps,
                       "tax_sell_side": args.tax_bps, "slippage_each_side": args.slippage_bps},
@@ -1711,6 +1959,8 @@ def main() -> int:
             "timezone": "Asia/Taipei",
             "downloaded_at": dt.datetime.now(TAIPEI).isoformat(),
             "period": args.period,
+            "trading_context_symbols": list(contexts),
+            "research_price_context_symbols": list(research_contexts),
             "missing_value_handling": "技術指標暖機列排除；參考市場最多向前填補 3 日",
             "corporate_actions": "yfinance auto_adjust=True",
         },
@@ -1752,6 +2002,7 @@ def main() -> int:
         "max_drawdown_at_most_25pct": "最大回撤 ≤ 24.9%",
         "oos_vs_development_winrate_gap_at_most_10pp": "OOS 與開發期勝率差異 ≤ 10 個百分點",
         "walk_forward_and_independent_oos_completed": "Walk-Forward 與獨立 OOS 已完成",
+        "probability_model_beats_base_rate": "模型機率 Brier 誤差優於無條件基準",
     }
     print(f"正式模型驗證：{'通過' if required_validation['passed'] else '未通過'}")
     for name, passed in required_validation["checks"].items():
@@ -1774,6 +2025,15 @@ def main() -> int:
     forecast = result["price_forecast"]
     dev_forecast = forecast["development_oos"]
     final_forecast = forecast["independent_oos"]
+    print(f"研究價格模型版本：{RESEARCH_MODEL_VERSION}；rolling window 最多 "
+          f"{RESEARCH_TRAIN_WINDOW} 個交易日")
+    for horizon in (1, 3, 5):
+        horizon_forecast = result["multi_horizon_price_forecasts"].get(str(horizon))
+        if horizon_forecast and horizon_forecast.get("available"):
+            print(f"{horizon} 日研究預測：{horizon_forecast['predicted_price']:.2f}；"
+                  f"80% 區間 {horizon_forecast['predicted_price_low']:.2f}～"
+                  f"{horizon_forecast['predicted_price_high']:.2f}；"
+                  f"驗證{'通過' if horizon_forecast['validation_passed'] else '未通過'}")
     if forecast["available"]:
         print(f"5 日研究中央預測價格：{forecast['predicted_price']:.2f}；"
               f"80% 區間：{forecast['predicted_price_low']:.2f}～"
@@ -1782,10 +2042,12 @@ def main() -> int:
     else:
         print(f"5 日研究價格預測：未產生；原因：{forecast['unavailable_reason']}")
     print(f"價格模型開發期：MAE {pct(dev_forecast['mae'])}；方向準確率 "
-          f"{pct(dev_forecast['direction_accuracy'])}；80% 區間覆蓋率 "
+          f"{pct(dev_forecast['direction_accuracy'])}；平衡方向準確率 "
+          f"{pct(dev_forecast.get('balanced_direction_accuracy'))}；80% 區間覆蓋率 "
           f"{pct(dev_forecast['interval_80_coverage'])}")
     print(f"價格模型保留期：MAE {pct(final_forecast['mae'])}；方向準確率 "
-          f"{pct(final_forecast['direction_accuracy'])}；80% 區間覆蓋率 "
+          f"{pct(final_forecast['direction_accuracy'])}；平衡方向準確率 "
+          f"{pct(final_forecast.get('balanced_direction_accuracy'))}；80% 區間覆蓋率 "
           f"{pct(final_forecast['interval_80_coverage'])}")
     scenario = result["research_scenario"]
     if scenario.get("available") and not scenario.get("validated"):
@@ -1824,8 +2086,16 @@ def main() -> int:
             reason = "歷史交易驗證閘門未通過"
         else:
             reason = "建議價未通過多重時間切割與成本壓力驗證"
-        print(f"買賣點：目前沒有進場點；原因：{reason}")
-        print("建議買進價／區間／分批比例／停損停利：不提供（驗證未通過）")
+        ep = result["execution_plan"]
+        print(f"正式結論：不交易；原因：{reason}")
+        print("以下價位為模型未通過驗證的研究參考，不代表可執行訊號：")
+        print(f"  預測價：{scenario['raw_estimated_price']:.2f}")
+        print(f"  買進價：{ep['suggested_entry']:.2f}；區間 "
+              f"{ep['entry_low']:.2f}～{ep['entry_high']:.2f}")
+        print(f"  停損：{ep['stop']:.2f}；第一停利：{ep['take_profit_1']:.2f}；"
+              f"第二停利：{ep['take_profit_2']:.2f}")
+        print(f"  分批比例：每批 {ep['maximum_capital_ratio'] / 2:.1%}（分母："
+              f"{ep['position_sizing_denominator']}）")
     print(f"預測信心：{result['confidence']}；主要風險：" + "、".join(result["main_risks"]))
     print("=" * 62)
     if holding is not None:

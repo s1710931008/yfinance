@@ -61,7 +61,7 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
     for row in rows:
         actionable = row["action"] != "不交易"
         settled = row["settled_at"] is not None
-        has_trade_levels = actionable and all(
+        has_trade_levels = all(
             row[name] is not None for name in (
                 "suggested_entry", "entry_low", "entry_high", "stop_price",
                 "take_profit_1", "take_profit_2"))
@@ -77,6 +77,7 @@ def export_history(database: str, limit: int = 30) -> dict[str, object]:
             "model_version": row["model_version"],
             "strategy_version": row["strategy_version"],
             "trade_levels_available": has_trade_levels,
+            "trade_levels_actionable": actionable,
             "suggested_entry": row["suggested_entry"] if has_trade_levels else None,
             "entry_low": row["entry_low"] if has_trade_levels else None,
             "entry_high": row["entry_high"] if has_trade_levels else None,

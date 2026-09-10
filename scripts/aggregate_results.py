@@ -13,11 +13,16 @@ import os
 from glob import glob
 from collections import defaultdict
 import pandas as pd
+try:
+    from strategy_config import THRESHOLD
+except ModuleNotFoundError:
+    from scripts.strategy_config import THRESHOLD
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--artifacts-dir", default="./artifacts")
     p.add_argument("--out", default="./report/summary.json")
+    p.add_argument("--threshold", type=float, default=THRESHOLD)
     return p.parse_args()
 
 def main():
@@ -46,8 +51,10 @@ def main():
         df['label'] = pd.to_numeric(df['label'], errors='coerce')
     oos_prob = {
         "predictions": int(len(df)),
-        "signals": int((df.probability >= 0.0).sum()) if not df.empty else 0,
-        "buy_precision": float(df.loc[df.probability >= 0.0, "label"].mean()) if not df.empty else None
+        "signals": int((df.probability >= args.threshold).sum()) if not df.empty else 0,
+        "buy_precision": float(df.loc[df.probability >= args.threshold, "label"].mean())
+        if not df.empty and (df.probability >= args.threshold).any() else None,
+        "threshold": args.threshold,
     }
     summary = {
         "fold_files": files,

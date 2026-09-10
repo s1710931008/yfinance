@@ -1,5 +1,49 @@
 # Changelog
 
+## [Research model 20260910.1] - 2026-09-10
+
+### Added
+
+- 新增 1／3／5 日研究價格預測；各期限獨立執行 Walk-Forward、時間隔離 OOS 與最新推論，不影響正式交易分類器或訊號。
+- 新增 HistGradientBoosting、Ridge／ExtraTrees／HistGradientBoosting 等權集成，以及 50% conformal 預測區間。
+- 新增 RMSE、相對零報酬 MAE 改善率、方向 balanced accuracy、上下行 recall 與預測區間平均寬度。
+
+### Changed
+
+- 研究價格模型使用最近最多 1,260 個交易日的 rolling training window；固定候選集合在各 fold 訓練窗口尾端校準期內選擇，測試期不參與選模。
+- 價格模型 MAE 通過條件由「略優於零報酬」提高為至少改善 2%，並增加 balanced direction accuracy ≥ 52% 門檻。
+- 研究模型版本獨立為 `20260910.1`；正式交易模型與策略維持 `20260908.1`，避免研究價格修改被誤認為交易訊號版本變更。
+- 價格模型驗證未通過時仍輸出可計算的研究價與區間，但明確標示未通過驗證及不可作為交易訊號。
+
+### Validation
+
+- 使用者於 2026-09-10 明確確認「優化研究價格模型」。修改前已同步 Git commit `80e2733`，並從最新成功 Run #43 下載 GitHub Actions SQLite；下載版 31 筆、最大 ID 33，`integrity_check=ok` 且無 foreign key 違規。
+- 本機 SQLite 另有較晚但不在 GitHub artifact 的 ID 11，兩版未合併或覆寫；修改前歷史稽核唯讀使用 GitHub 版。GitHub 31 筆均為不交易，既有 outcome 不適合當正式交易 forward 勝率。
+- 完整 Walk-Forward 與獨立 OOS 已完成，`20260910.1` 整體狀態為 **模型未通過驗證**，不得取代正式模型。1 日開發／隔離 OOS 相對零報酬 MAE 改善為 -0.28%／-0.76%，balanced accuracy 49.96%／50.04%；3 日為 +0.18%／-2.64%，balanced accuracy 50.42%／51.00%；5 日為 -0.76%／+4.35%，balanced accuracy 47.68%／48.73%。各期限都未同時達到 MAE 改善至少 2%及 balanced accuracy 至少 52%。
+- 最新行情日 2026-09-10 的未驗證研究預測：1 日 37.28（80% 區間 35.44～39.11）、3 日 37.63（34.38～40.88）、5 日 37.30（32.94～41.66）。方向分類器在 fold 內校準表現較高、外層 OOS 回落，顯示選模型過度擬合風險；未依 OOS 結果降低門檻或事後挑選版本。
+- 正式交易模型與策略未修改；本次完整執行仍顯示正式模型未通過驗證、結論不交易。研究模型只產生明確標示未驗證的價位，不影響交易訊號、交易頻率、Profit Factor、最大回撤或 outcome 結算。
+
+## [20260908.1] - 2026-09-08
+
+### Added
+
+- 新增 `scripts/sync_github_database.py`：修改或評估前下載最新成功 GitHub Actions artifact 的 SQLite，在獨立目錄完成完整性、foreign key 與本機版本比較，永不直接覆蓋工作資料庫。
+- `AGENTS.md` 新增 GitHub 權威資料庫同步前置規則。使用者於 2026-09-08 明確確認本次修改。
+- `predictions` schema 新增 `predicted_price`；既有 append-only 資料庫只新增欄位，不修改歷史列。
+
+### Changed
+
+- 模型與策略版本提升為 `20260908.1`。主程式、分散 fold 與聚合器改由 `strategy_config.py` 共用門檻、標籤、成本、ATR 進出場及切割設定。
+- 修正分散 fold 使用舊標籤、22% 門檻及未套用開盤區間的口徑分歧；聚合訊號不再錯用 `probability >= 0`。
+- 行情與價格計算成功時，即使驗證未通過仍輸出並記錄預測、買進區間、停損及停利；正式 `action` 仍依策略驗證維持「不交易」，並標示未通過驗證／研究參考。
+- 正式驗證新增相對無條件正類率的 Brier Skill Score 門檻，並輸出 90% bootstrap 平均淨 R 區間；模型機率未優於簡單基準時不得標示整體驗證通過。
+
+### Validation
+
+- 修改前 35 項測試通過。Git 已同步至 `80e2733`；最新成功 GitHub Run #43（run ID `34064798540`）已定位，但目前沒有 `gh` 且 artifact API 回應 401，因此最新 GitHub SQLite 尚未完成同步，不宣稱已完成完整歷史績效比較。
+- 完整 Walk-Forward、獨立 OOS、修改後績效比較及 forward outcomes：**待驗證**。修正口徑可能改變樣本數、勝率、頻率、總報酬、最大回撤、Profit Factor 與平均盈虧比；不預填改善結果。
+- 共用參數降低執行路徑漂移，但 ExtraTrees、固定門檻與研究價格候選仍有過度擬合風險；後續驗證不得使用 OOS 選參數。
+
 本文件記錄 00631L 股票買賣價位預測模型、交易策略、回測規範、資料處理、資料庫 schema 與輸出格式的所有重要變更。
 
 格式參考 Keep a Changelog；模型版本與策略版本使用 `YYYYMMDD.N`，並分開管理。

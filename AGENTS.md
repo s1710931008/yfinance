@@ -629,6 +629,24 @@ END;
 
 \---
 
+**## 六之一、GitHub 權威資料庫同步前置作業**
+
+每次進行模型分析、策略評估、程式修正或資料庫 schema 修改前，必須先完成以下前置作業：
+
+1. 執行 `git pull --ff-only`，確認本機程式碼已同步遠端最新 commit。
+2. 找出 `predict.yml` 最新成功的 GitHub Actions Run，下載該 Run 的分析 artifact。
+3. 從 artifact 取得 `predictions.sqlite3`，不得只把 Git Repository 內追蹤的 SQLite 種子檔視為最新資料庫。
+4. 對下載資料庫執行 `PRAGMA integrity_check;` 與 `PRAGMA foreign_key_check;`。
+5. 比較下載版與本機版的資料筆數、最大 prediction ID 及最新 `predicted_at`。
+6. 分析與修改前歷史評估，必須以最新、完整且通過檢查的 GitHub Actions 資料庫作為唯讀權威來源。
+7. 下載版必須先放在獨立暫存或同步目錄，不得直接覆蓋本機資料庫；若兩邊各有獨有紀錄或結果，必須停止合併並向使用者揭露差異。
+8. GitHub artifact 需要驗證時，使用 `GH_TOKEN` 或 `GITHUB_TOKEN`；不得將 token 寫入 Repository、日誌或輸出。
+9. 若最新資料庫無法下載、artifact 已過期、驗證失敗或版本分歧尚未解決，必須明確標示「GitHub 最新歷史資料未完成同步」，不得聲稱已完成完整歷史績效評估。
+
+專案提供 `scripts/sync_github_database.py` 執行上述下載、完整性檢查及新舊摘要；此工具預設不得替換工作目錄中的資料庫。
+
+---
+
 **## 六、執行優先順序**
 
 如規則發生衝突，依下列順序處理：
