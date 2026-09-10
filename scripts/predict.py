@@ -526,7 +526,10 @@ def research_return_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
         learning_rate=0.04, max_iter=180, max_leaf_nodes=15,
         min_samples_leaf=20, l2_regularization=1.0, random_state=47)
     class_counts = np.bincount(direction_y, minlength=2)
-    class_weights = np.where(class_counts > 0, len(direction_y) / (2 * class_counts), 1.0)
+    class_weights = np.ones(2, dtype=float)
+    present_classes = class_counts > 0
+    class_weights[present_classes] = (
+        len(direction_y) / (2 * class_counts[present_classes]))
     direction_hgb.fit(x_fit, direction_y, sample_weight=class_weights[direction_y])
     direction_probabilities = {
         "direction_logistic": (direction_logistic.predict_proba(x_cal)[:, 1],
