@@ -34,7 +34,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 try:
-    from strategy_config import (COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+    from strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                  ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                  FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
                                  MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
@@ -42,7 +42,7 @@ try:
                                  SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
                                  TAX_BPS, THRESHOLD)
 except ModuleNotFoundError:  # imported as scripts.predict by tests and library callers
-    from scripts.strategy_config import (COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+    from scripts.strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                          ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                          FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
                                          MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
@@ -98,8 +98,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--futures-symbol",
                    help="Optional Yahoo-compatible continuous futures symbol (Taiwan WTX codes are not exposed by yfinance)")
     p.add_argument("--min-train", type=int, default=MIN_TRAIN)
-    p.add_argument("--feature-set", choices=["baseline", "all"], default="all",
-                   help="all is the AGENTS.md default; baseline is retained for comparison")
+    p.add_argument("--feature-set", choices=["baseline", "all", "all-bollinger"], default="all",
+                   help=("all is the AGENTS.md default; all-bollinger adds research-only "
+                         "Bollinger features; baseline is retained for comparison"))
     p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees",
                    help="Prediction model (default: extra-trees experimental candidate)")
     p.add_argument("--label-mode", choices=["legacy-target", "trade-outcome"],
@@ -265,6 +266,16 @@ def add_technical_features(d: pd.DataFrame) -> list[str]:
             "kd_spread", "macd", "macd_signal", "macd_hist", "macd_hist_delta"]
 
 
+def add_bollinger_features(d: pd.DataFrame) -> list[str]:
+    """Add 20-day, 2-standard-deviation Bollinger features without future data."""
+    middle = d.Close.rolling(20).mean()
+    deviation = d.Close.rolling(20).std()
+    upper, lower = middle + 2 * deviation, middle - 2 * deviation
+    d["bb_percent_b_20_2"] = (d.Close - lower) / (upper - lower).replace(0, np.nan)
+    d["bb_width_20_2"] = (upper - lower) / middle.replace(0, np.nan)
+    return ["bb_percent_b_20_2", "bb_width_20_2"]
+
+
 def trade_outcome_labels(market: pd.DataFrame, horizon: int, stop_atr: float,
                          reward_risk: float, commission_bps: float,
                          tax_bps: float, slippage_bps: float,
@@ -343,10 +354,12 @@ def build_dataset(primary: pd.DataFrame, contexts: dict[str, pd.DataFrame],
                 "sma60_gap", "trend_20_60", "vol_20", "vol_ratio", "rsi14",
                 "volume_z20", "range_atr"]
     technical = add_technical_features(d)
-    if feature_set == "all":
+    if feature_set in {"all", "all-bollinger"}:
         features = list(dict.fromkeys(features + technical + [
             "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap"
         ]))
+    if feature_set == "all-bollinger":
+        features.extend(add_bollinger_features(d))
     for i, (symbol, ctx) in enumerate(contexts.items()):
         aligned = ctx.Close.reindex(d.index).ffill(limit=3)
         safe = "".join(ch if ch.isalnum() else "_" for ch in symbol).strip("_") or f"ctx{i}"
@@ -1596,7 +1609,8 @@ def record_prediction(database: str, result: dict, latest: pd.Series,
         indicators = {name: clean_json(float(latest[name])) for name in (
             "rsi14", "kd_k", "kd_d", "macd", "macd_signal", "macd_hist",
             "volume_z20", "volume_ratio_5_20", "trend_20_60", "ATR",
-            "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap"
+            "support20_gap", "resistance20_gap", "support60_gap", "resistance60_gap",
+            "bb_percent_b_20_2", "bb_width_20_2"
         ) if name in latest and pd.notna(latest[name])}
         source = dict(result["data_source_snapshot"])
         source["market_date"] = result["latest_date"]
@@ -1674,13 +1688,13 @@ def main() -> int:
     args = parse_args()
     if args.threshold is None:
         args.threshold = THRESHOLD if args.model == "extra-trees" else 0.70
-    if args.model == "extra-trees" and args.feature_set == "all":
+    if args.model == "extra-trees" and args.feature_set in {"all", "all-bollinger"}:
         for name, value in CANDIDATE_20260819_3.items():
             if name != "selection_scope":
                 setattr(args, name, value)
     args.risk_policy = bool(
         args.ticker.upper() in {"00631L", "00631L.TW"}
-        and args.model == "extra-trees" and args.feature_set == "all")
+        and args.model == "extra-trees" and args.feature_set in {"all", "all-bollinger"})
     if not 0.10 <= args.final_test <= 0.40:
         raise SystemExit("--final-test must be between 0.10 and 0.40")
     if args.horizon < 1 or args.folds < 2 or not 0 < args.threshold < 1:
@@ -1873,8 +1887,9 @@ def main() -> int:
     ]
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
-        "model_version": (CANDIDATE_B_MODEL_VERSION
-                          if args.label_mode == "trade-outcome" else
+        "model_version": (BOLLINGER_CANDIDATE_MODEL_VERSION
+                          if args.model == "extra-trees" and args.feature_set == "all-bollinger" else
+                          CANDIDATE_B_MODEL_VERSION if args.label_mode == "trade-outcome" else
                           MODEL_VERSION if args.model == "extra-trees" else
                           "20260818.1"),
         "label_mode": args.label_mode,
@@ -1991,7 +2006,8 @@ def main() -> int:
     if holding is not None:
         print("持股提醒：買進條件是新部位訊號，不代表既有持股必須加碼")
     model_zh = "ExtraTrees 完整技術指標版" if args.model == "extra-trees" else "Logistic 基準版"
-    features_zh = "全技術指標" if args.feature_set == "all" else "基礎特徵"
+    features_zh = ({"all": "全技術指標", "all-bollinger": "全技術指標＋布林帶研究候選"}
+                   .get(args.feature_set, "基礎特徵"))
     print(f"模型版本：{model_zh}；{features_zh}")
     print("分類標籤：" + ("候選 B－扣成本後的實際交易結果"
                          if args.label_mode == "trade-outcome" else

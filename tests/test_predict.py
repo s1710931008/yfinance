@@ -386,6 +386,27 @@ def test_build_dataset_has_context_and_no_tail_labels():
     assert data.future_low_return.tail(5).isna().all()
 
 
+def test_bollinger_candidate_adds_only_expected_features_without_lookahead():
+    idx = pd.date_range("2023-01-01", periods=100, freq="B")
+    close = pd.Series(np.linspace(100, 130, 100), index=idx)
+    frame = pd.DataFrame({"Open": close, "High": close + 1, "Low": close - 1,
+                          "Close": close, "Volume": 1000}, index=idx)
+    _baseline, baseline_features = predict.build_dataset(
+        frame, {}, 5, .04, -.025, "all")
+    candidate, candidate_features = predict.build_dataset(
+        frame, {}, 5, .04, -.025, "all-bollinger")
+    assert set(candidate_features) - set(baseline_features) == {
+        "bb_percent_b_20_2", "bb_width_20_2"}
+
+    changed = frame.copy()
+    changed.loc[idx[-1], "Close"] = 9999
+    changed_candidate, _ = predict.build_dataset(
+        changed, {}, 5, .04, -.025, "all-bollinger")
+    for name in ("bb_percent_b_20_2", "bb_width_20_2"):
+        pd.testing.assert_series_equal(
+            candidate.loc[:idx[-2], name], changed_candidate.loc[:idx[-2], name])
+
+
 def test_simulation_can_require_positive_predicted_return():
     market = market_frame()
     rows = market.iloc[[0]].copy()

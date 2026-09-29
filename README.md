@@ -296,7 +296,7 @@ balanced accuracy、區間覆蓋率與寬度。MAE 必須至少優於零報酬�
 | `--reward-risk` | 停利的 R 倍數 | `2.0` |
 | `--entry-gap-low-atr` | 下一日開盤相對訊號收盤的最低 ATR 位移；負值代表低開 | CLI `0.15`；正式候選策略 `-0.25` |
 | `--entry-gap-high-atr` | 下一日開盤相對訊號收盤的最高 ATR 位移 | CLI `0.55`；正式候選策略 `0.25` |
-| `--feature-set` | `baseline` 基礎版或 `all` 全指標版 | `all` |
+| `--feature-set` | `baseline` 基礎版、`all` 全指標正式版，或 `all-bollinger` 布林帶研究候選 | `all` |
 | `--model` | `extra-trees` 實驗升級版或 `logistic` 基準版 | `extra-trees` |
 | `--label-mode` | `trade-outcome` 每日預設 B 標籤；`legacy-target` 保留 A 基準 | `trade-outcome` |
 | `--database` | 追加保存預測紀錄的 SQLite 路徑 | `predictions.sqlite3` |
@@ -307,8 +307,8 @@ balanced accuracy、區間覆蓋率與寬度。MAE 必須至少優於零報酬�
 | `--output-json` | 完整結果及交易明細檔案 | 不輸出 |
 
 B 將正類別定義為「下一交易日開盤符合成交區間，且依現行停損、停利與
-時間出場後，扣除成本仍獲利」。B 目前仍未通過正式驗證，所以每日預設雖改用 B
-計算與紀錄，仍只會輸出「不交易」且不提供價位。研究重跑建議加 `--no-record`：
+時間出場後，扣除成本仍獲利」。若 B 未通過正式驗證，正式動作維持「不交易」，
+但行情與必要計算成功時仍會輸出明確標示未驗證的研究價位。研究重跑建議加 `--no-record`：
 
 ```bash
 .venv/bin/python scripts/predict.py 00631L.TW \
@@ -360,15 +360,18 @@ B 將正類別定義為「下一交易日開盤符合成交區間，且依現行
 - **MACD**：12/26 日 MACD、9 日訊號線、柱狀體及柱狀體變化。
 - **RSI**：14 日 RSI。
 - **支撐壓力**：收盤距離20日及60日最低／最高價的位置。
+- **布林帶研究候選**：`--feature-set all-bollinger` 額外加入20日、2標準差的 `%B` 與帶寬；不直接把碰觸上下軌當成買賣規則。
 
 加入指標不代表勝率必然提高。是否有效應比較樣本外的訊號命中率、EV_R、獲利因子、
 最大回撤與 final test，不能只比較訓練資料的準確率。
 
 依 `AGENTS.md`，預設使用完整技術指標版，但完整不等於一定通過驗證。若9組時間
-切割或成本壓力測試失敗，程式仍輸出「不交易」且不提供建議價格。若要比較基礎版：
+切割或成本壓力測試失敗，正式動作仍輸出「不交易」，並另列未驗證研究價位。
+若要比較基礎版或布林帶候選：
 
 ```bash
 .venv/bin/python scripts/predict.py 00631L.TW --period 10y --folds 5 --feature-set baseline --no-record
+.venv/bin/python scripts/predict.py 00631L.TW --period max --folds 5 --feature-set all-bollinger --no-record
 ```
 
 ## SQLite 預測紀錄
