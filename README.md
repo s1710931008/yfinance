@@ -301,6 +301,7 @@ balanced accuracy、區間覆蓋率與寬度。MAE 必須至少優於零報酬�
 | `--label-mode` | `trade-outcome` 每日預設 B 標籤；`legacy-target` 保留 A 基準 | `trade-outcome` |
 | `--database` | 追加保存預測紀錄的 SQLite 路徑 | `predictions.sqlite3` |
 | `--no-record` | 研究比較時不寫入 SQLite | 不啟用 |
+| `--intraday-entry-filter` | `bollinger-15m` 記錄15分鐘布林帶進場時機研究；不影響正式訊號 | `off` |
 | `--shares` | 現有持股股數，需搭配平均成本 | 不啟用 |
 | `--average-cost` | 每股平均成本，需搭配持股股數 | 不啟用 |
 | `--add-shares` | 單次加碼／攤平的股數上限 | `100` |
@@ -361,6 +362,7 @@ B 將正類別定義為「下一交易日開盤符合成交區間，且依現行
 - **RSI**：14 日 RSI。
 - **支撐壓力**：收盤距離20日及60日最低／最高價的位置。
 - **布林帶研究候選**：`--feature-set all-bollinger` 額外加入20日、2標準差的 `%B` 與帶寬；不直接把碰觸上下軌當成買賣規則。
+- **15分鐘進場研究**：`--intraday-entry-filter bollinger-15m` 額外記錄20／36／90根完整15分鐘K棒的 `%B` 與帶寬。20根約1個台股交易日、36根約2日、90根約5日；只研究進場時機，不改變日線5日模型、正式 action 或交易閘門。至少累積30筆 forward outcomes 並完成成本壓力驗證前，一律標示「待驗證、不可交易」。
 
 加入指標不代表勝率必然提高。是否有效應比較樣本外的訊號命中率、EV_R、獲利因子、
 最大回撤與 final test，不能只比較訓練資料的準確率。

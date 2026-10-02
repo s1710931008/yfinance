@@ -65,6 +65,7 @@ jobs:
             --adverse -0.025 \
             --folds 5 \
             --label-mode trade-outcome \
+            --intraday-entry-filter bollinger-15m \
             --database artifacts/predictions.sqlite3 \
             --output-json artifacts/validation.json \
             2>&1 | tee artifacts/predict.log

@@ -37,7 +37,7 @@ try:
     from strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                  ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                  FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
-                                 MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
+                                 INTRADAY_RESEARCH_VERSION, MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
                                  RESEARCH_MODEL_VERSION, RESEARCH_TRAIN_WINDOW,
                                  SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
                                  TAX_BPS, THRESHOLD)
@@ -45,7 +45,7 @@ except ModuleNotFoundError:  # imported as scripts.predict by tests and library 
     from scripts.strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                          ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                          FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
-                                         MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
+                                         INTRADAY_RESEARCH_VERSION, MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
                                          RESEARCH_MODEL_VERSION, RESEARCH_TRAIN_WINDOW,
                                          SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
                                          TAX_BPS, THRESHOLD)
@@ -111,6 +111,8 @@ def parse_args() -> argparse.Namespace:
                    help="Append-only prediction history database")
     p.add_argument("--no-record", action="store_true",
                    help="Do not write this run to SQLite (research comparison only)")
+    p.add_argument("--intraday-entry-filter", choices=["off", "bollinger-15m"],
+                   default="off", help="Research-only 15-minute entry-timing snapshot")
     p.add_argument("--shares", type=int, help="Current holding shares; use with --average-cost")
     p.add_argument("--average-cost", type=float,
                    help="Average cost per share including existing buy-side costs")
@@ -208,6 +210,24 @@ def _flat_download(symbol: str, period: str) -> pd.DataFrame:
     return cleaned
 
 
+def _flat_intraday_download(symbol: str, period: str = "60d") -> pd.DataFrame:
+    """Download completed 15-minute bars; no daily fallback is mixed into intraday data."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        frame = yf.download(symbol, period=period, interval="15m", auto_adjust=True,
+                            progress=False, actions=False, threads=False)
+    index = pd.to_datetime(frame.index)
+    if index.tz is not None:
+        frame = frame.copy()
+        frame.index = index.tz_convert("Asia/Taipei")
+    cleaned = _clean_ohlcv_frame(frame, symbol)
+    now_taipei = pd.Timestamp.now(tz="Asia/Taipei").tz_localize(None)
+    completed = cleaned[cleaned.index + pd.Timedelta(minutes=15) <= now_taipei]
+    if completed.empty:
+        raise RuntimeError(f"{symbol}: no completed 15-minute OHLCV rows")
+    return completed
+
+
 def download_data(ticker: str, context: Iterable[str], period: str) -> tuple[pd.DataFrame, dict[str, pd.DataFrame], list[str]]:
     primary = _flat_download(ticker, period)
     frames: dict[str, pd.DataFrame] = {}
@@ -274,6 +294,50 @@ def add_bollinger_features(d: pd.DataFrame) -> list[str]:
     d["bb_percent_b_20_2"] = (d.Close - lower) / (upper - lower).replace(0, np.nan)
     d["bb_width_20_2"] = (upper - lower) / middle.replace(0, np.nan)
     return ["bb_percent_b_20_2", "bb_width_20_2"]
+
+
+def intraday_bollinger_research(frame: pd.DataFrame, entry_low: float,
+                                entry_high: float) -> dict[str, object]:
+    """Build a non-actionable 15-minute timing snapshot from completed bars only."""
+    close = frame.Close.astype(float)
+    windows = (20, 36, 90)
+    snapshots: dict[str, dict[str, float]] = {}
+    for window in windows:
+        middle = close.rolling(window).mean()
+        deviation = close.rolling(window).std()
+        upper, lower = middle + 2 * deviation, middle - 2 * deviation
+        denominator = (upper - lower).replace(0, np.nan)
+        percent_b = (close - lower) / denominator
+        width = denominator / middle.replace(0, np.nan)
+        values = (middle.iloc[-1], lower.iloc[-1], upper.iloc[-1],
+                  percent_b.iloc[-1], width.iloc[-1])
+        if not all(np.isfinite(value) for value in values):
+            raise ValueError(f"15-minute Bollinger window {window} is not computable")
+        snapshots[str(window)] = {
+            "middle": float(values[0]), "lower": float(values[1]),
+            "upper": float(values[2]), "percent_b": float(values[3]),
+            "width": float(values[4]),
+        }
+    latest_close = float(close.iloc[-1])
+    standard = snapshots["20"]
+    checks = {
+        "inside_daily_research_entry_range": entry_low <= latest_close <= entry_high,
+        "percent_b_between_0_20_and_0_80": 0.20 <= standard["percent_b"] <= 0.80,
+        "at_least_90_completed_bars": len(frame) >= 90,
+    }
+    return {
+        "enabled": True, "available": True,
+        "version": INTRADAY_RESEARCH_VERSION,
+        "timeframe": "15m", "source": "Yahoo Finance via yfinance",
+        "latest_bar": pd.Timestamp(frame.index[-1]).tz_localize("Asia/Taipei").isoformat(),
+        "latest_close": latest_close, "completed_bars": int(len(frame)),
+        "windows": snapshots, "checks": checks,
+        "timing_condition_met": all(checks.values()),
+        "validation_status": "待驗證",
+        "forward_observations": 0, "minimum_forward_observations": 30,
+        "actionable": False, "affects_formal_signal": False,
+        "warning": "15分鐘資料僅供進場時機研究；尚無足夠 forward outcomes，不得改變正式日線訊號",
+    }
 
 
 def trade_outcome_labels(market: pd.DataFrame, horizon: int, stop_atr: float,
@@ -1885,6 +1949,27 @@ def main() -> int:
             "strict_entry_validation": strict_passed,
         }.items() if not passed
     ]
+    intraday_research: dict[str, object] = {
+        "enabled": False, "available": False,
+        "version": INTRADAY_RESEARCH_VERSION,
+        "validation_status": "未啟用", "actionable": False,
+        "affects_formal_signal": False,
+    }
+    if args.intraday_entry_filter == "bollinger-15m":
+        try:
+            intraday_frame = _flat_intraday_download(args.ticker)
+            intraday_research = intraday_bollinger_research(
+                intraday_frame, candidate_low, candidate_high)
+        except (RuntimeError, ValueError) as exc:
+            intraday_research = {
+                "enabled": True, "available": False,
+                "version": INTRADAY_RESEARCH_VERSION,
+                "validation_status": "資料不足", "actionable": False,
+                "affects_formal_signal": False, "error": str(exc),
+                "warning": "15分鐘資料不足；正式日線訊號不受影響",
+            }
+    required_validation = dict(required_validation)
+    required_validation["intraday_entry_filter"] = intraday_research
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
         "model_version": (BOLLINGER_CANDIDATE_MODEL_VERSION
@@ -1918,6 +2003,7 @@ def main() -> int:
         "price_forecast": price_forecast,
         "multi_horizon_price_forecasts": multi_horizon_forecasts,
         "research_scenario": research_scenario,
+        "intraday_entry_filter": intraday_research,
         "candidate_strategy": {"version": STRATEGY_VERSION,
                                "parameters": CANDIDATE_20260819_3,
                                "risk_policy": RISK_POLICY_20260828_2,
@@ -2039,6 +2125,18 @@ def main() -> int:
     print(f"  正報酬測試 {strict_summary['positive_run_ratio'] * strict_summary['runs']:.0f}/"
           f"{strict_summary['runs']}；雙倍成本平均 {fmt(strict_summary['double_cost_median_ev_r'])}R；"
           f"PF {fmt(strict_summary['double_cost_median_profit_factor'])}")
+    intraday = result["intraday_entry_filter"]
+    if intraday.get("enabled"):
+        if intraday.get("available"):
+            bb20 = intraday["windows"]["20"]
+            print("15分鐘布林帶進場過濾：待驗證（不影響正式日線訊號）")
+            print(f"  最新完整K棒：{intraday['latest_bar']}；價格 {intraday['latest_close']:.2f}；"
+                  f"%B {bb20['percent_b']:.3f}；帶寬 {bb20['width']:.3%}")
+            print(f"  研究時機條件：{'符合' if intraday['timing_condition_met'] else '不符合'}；"
+                  f"forward 樣本 {intraday['forward_observations']}/"
+                  f"{intraday['minimum_forward_observations']}，不可作為交易訊號")
+        else:
+            print(f"15分鐘布林帶進場過濾：資料不足（{intraday.get('error', '未知原因')}）")
     entry_plan = result["entry_plan"]
     print(f"最新收盤參考價：{latest_close:.2f}（不是預測價）")
     forecast = result["price_forecast"]

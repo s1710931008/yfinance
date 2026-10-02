@@ -407,6 +407,43 @@ def test_bollinger_candidate_adds_only_expected_features_without_lookahead():
             candidate.loc[:idx[-2], name], changed_candidate.loc[:idx[-2], name])
 
 
+def test_intraday_bollinger_research_is_non_actionable_and_uses_completed_history():
+    idx = pd.date_range("2026-01-01 09:00", periods=120, freq="15min")
+    close = pd.Series(100 + np.sin(np.arange(120) / 8), index=idx)
+    frame = pd.DataFrame({"Open": close, "High": close + .2, "Low": close - .2,
+                          "Close": close, "Volume": 1000}, index=idx)
+    result = predict.intraday_bollinger_research(frame, 99, 101)
+    assert result["available"]
+    assert not result["actionable"]
+    assert not result["affects_formal_signal"]
+    assert result["validation_status"] == "待驗證"
+    assert result["completed_bars"] == 120
+    assert result["latest_bar"].endswith("+08:00")
+    assert set(result["windows"]) == {"20", "36", "90"}
+    assert result["forward_observations"] == 0
+
+    earlier = predict.intraday_bollinger_research(frame.iloc[:-1], 99, 101)
+    changed = frame.copy()
+    changed.iloc[-1, changed.columns.get_loc("Close")] = 999
+    changed_earlier = predict.intraday_bollinger_research(changed.iloc[:-1], 99, 101)
+    assert earlier["windows"] == changed_earlier["windows"]
+
+
+def test_intraday_download_converts_utc_to_taipei_and_drops_open_bar(monkeypatch):
+    now = pd.Timestamp.now(tz="Asia/Taipei")
+    completed_start = (now - pd.Timedelta(minutes=30)).floor("15min")
+    open_start = now.floor("15min")
+    utc_index = pd.DatetimeIndex([completed_start, open_start]).tz_convert("UTC")
+    frame = pd.DataFrame({"Open": [100, 101], "High": [101, 102],
+                          "Low": [99, 100], "Close": [100.5, 101.5],
+                          "Volume": [1000, 1200]}, index=utc_index)
+    monkeypatch.setattr(predict.yf, "download", lambda *_args, **_kwargs: frame)
+    result = predict._flat_intraday_download("00631L.TW")
+    assert result.index.tz is None
+    assert result.index[-1] == completed_start.tz_localize(None)
+    assert open_start.tz_localize(None) not in result.index
+
+
 def test_simulation_can_require_positive_predicted_return():
     market = market_frame()
     rows = market.iloc[[0]].copy()
