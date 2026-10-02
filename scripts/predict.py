@@ -34,7 +34,8 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 try:
-    from strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+    from strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, CANDIDATE_C_MODEL_VERSION,
+                                 COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                  ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                  FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
                                  INTRADAY_RESEARCH_VERSION, MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
@@ -42,7 +43,8 @@ try:
                                  SLIPPAGE_BPS, STOP_ATR, STRATEGY_VERSION,
                                  TAX_BPS, THRESHOLD)
 except ModuleNotFoundError:  # imported as scripts.predict by tests and library callers
-    from scripts.strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
+    from scripts.strategy_config import (BOLLINGER_CANDIDATE_MODEL_VERSION, CANDIDATE_C_MODEL_VERSION,
+                                         COMMISSION_BPS, DATABASE_SCHEMA_VERSION,
                                          ENTRY_GAP_HIGH_ATR, ENTRY_GAP_LOW_ATR,
                                          FINAL_TEST_FRACTION, HORIZON, LABEL_MODE, MIN_TRAIN,
                                          INTRADAY_RESEARCH_VERSION, MINIMUM_PREDICTED_RETURN, MODEL_VERSION, REWARD_RISK,
@@ -101,7 +103,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--feature-set", choices=["baseline", "all", "all-bollinger"], default="all",
                    help=("all is the AGENTS.md default; all-bollinger adds research-only "
                          "Bollinger features; baseline is retained for comparison"))
-    p.add_argument("--model", choices=["extra-trees", "logistic"], default="extra-trees",
+    p.add_argument("--model", choices=["extra-trees", "logistic", "ensemble-c"], default="extra-trees",
                    help="Prediction model (default: extra-trees experimental candidate)")
     p.add_argument("--label-mode", choices=["legacy-target", "trade-outcome"],
                    default=LABEL_MODE,
@@ -466,6 +468,14 @@ def model(kind: str = "logistic") -> Pipeline:
                 n_estimators=500, min_samples_leaf=12, max_features=0.7,
                 class_weight="balanced", random_state=42, n_jobs=-1)),
         ])
+    if kind == "hist-gradient-boosting":
+        return Pipeline([
+            ("impute", SimpleImputer(strategy="median")),
+            ("clf", HistGradientBoostingClassifier(
+                learning_rate=0.04, max_iter=180, max_leaf_nodes=15,
+                min_samples_leaf=20, l2_regularization=1.0,
+                random_state=48)),
+        ])
     return Pipeline([
         ("impute", SimpleImputer(strategy="median")),
         ("scale", StandardScaler()),
@@ -474,9 +484,92 @@ def model(kind: str = "logistic") -> Pipeline:
     ])
 
 
+ENSEMBLE_C_WEIGHT_CANDIDATES = (
+    (1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+    (0.5, 0.5, 0.0), (0.5, 0.0, 0.5), (0.0, 0.5, 0.5),
+    (1 / 3, 1 / 3, 1 / 3), (0.6, 0.2, 0.2),
+    (0.2, 0.6, 0.2), (0.2, 0.2, 0.6),
+)
+
+
+def ensemble_c_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
+                           features: list[str], purge: int = 0
+                           ) -> tuple[np.ndarray, dict[str, object], LogisticRegression | None]:
+    """Select fixed ensemble weights and calibrate inside chronological training only."""
+    if len(train) < 120 or train.label.nunique() < 2:
+        raise RuntimeError("insufficient class history for candidate C")
+    first = max(60, int(len(train) * 0.70))
+    second = max(first + 30, int(len(train) * 0.85))
+    second = min(second, len(train) - 20)
+    fit = train.iloc[:max(1, first - purge)]
+    selection = train.iloc[first:second]
+    calibration = train.iloc[second:]
+    if min(len(fit), len(selection), len(calibration)) < 20:
+        raise RuntimeError("insufficient chronological partitions for candidate C")
+
+    families = ("extra-trees", "logistic", "hist-gradient-boosting")
+    fitted: dict[str, Pipeline] = {}
+    selection_probabilities: dict[str, np.ndarray] = {}
+    calibration_probabilities: dict[str, np.ndarray] = {}
+    test_probabilities: dict[str, np.ndarray] = {}
+    y_fit = fit.label.astype(int).to_numpy()
+    counts = np.bincount(y_fit, minlength=2)
+    class_weights = np.ones(2, dtype=float)
+    present = counts > 0
+    class_weights[present] = len(y_fit) / (2 * counts[present])
+    for family in families:
+        fitted_model = model(family)
+        if family == "hist-gradient-boosting":
+            fitted_model.fit(fit[features], fit.label.astype(int),
+                             clf__sample_weight=class_weights[y_fit])
+        else:
+            fitted_model.fit(fit[features], fit.label.astype(int))
+        fitted[family] = fitted_model
+        selection_probabilities[family] = fitted_model.predict_proba(selection[features])[:, 1]
+        calibration_probabilities[family] = fitted_model.predict_proba(calibration[features])[:, 1]
+        test_probabilities[family] = fitted_model.predict_proba(test[features])[:, 1]
+
+    y_selection = selection.label.astype(int).to_numpy()
+    scored: list[tuple[float, tuple[float, float, float]]] = []
+    for weights in ENSEMBLE_C_WEIGHT_CANDIDATES:
+        blended = sum(weight * selection_probabilities[family]
+                      for weight, family in zip(weights, families))
+        scored.append((float(brier_score_loss(y_selection, blended)), weights))
+    selection_brier, selected_weights = min(scored, key=lambda item: (item[0], item[1]))
+
+    raw_calibration = sum(weight * calibration_probabilities[family]
+                          for weight, family in zip(selected_weights, families))
+    raw_test = sum(weight * test_probabilities[family]
+                   for weight, family in zip(selected_weights, families))
+    raw_calibration = np.clip(raw_calibration, 1e-6, 1 - 1e-6)
+    raw_test = np.clip(raw_test, 1e-6, 1 - 1e-6)
+    calibrator = None
+    if calibration.label.nunique() == 2:
+        calibrator = LogisticRegression(C=1e3, max_iter=1000).fit(
+            np.log(raw_calibration / (1 - raw_calibration)).reshape(-1, 1),
+            calibration.label.astype(int))
+        probability = calibrator.predict_proba(
+            np.log(raw_test / (1 - raw_test)).reshape(-1, 1))[:, 1]
+    else:
+        probability = raw_test
+    metadata: dict[str, object] = {
+        "version": CANDIDATE_C_MODEL_VERSION,
+        "families": list(families),
+        "weights": dict(zip(families, selected_weights)),
+        "weight_selection_brier": selection_brier,
+        "weight_candidates": len(ENSEMBLE_C_WEIGHT_CANDIDATES),
+        "fit_samples": len(fit), "selection_samples": len(selection),
+        "calibration_samples": len(calibration),
+        "selection_scope": "僅使用外層 fold 訓練窗口內的中段時間序列",
+    }
+    return probability, metadata, calibrator
+
+
 def calibrated_fit_predict(train: pd.DataFrame, test: pd.DataFrame,
                            features: list[str], purge: int = 0,
-                           model_kind: str = "logistic") -> tuple[np.ndarray, Pipeline, LogisticRegression | None]:
+                           model_kind: str = "logistic") -> tuple[np.ndarray, object, LogisticRegression | None]:
+    if model_kind == "ensemble-c":
+        return ensemble_c_fit_predict(train, test, features, purge)
     split = max(int(len(train) * 0.8), len(train) - 126)
     split = min(max(split, 50), len(train) - 20)
     fit, cal = train.iloc[:max(1, split - purge)], train.iloc[split:]
@@ -1751,14 +1844,15 @@ def pct(value) -> str:
 def main() -> int:
     args = parse_args()
     if args.threshold is None:
-        args.threshold = THRESHOLD if args.model == "extra-trees" else 0.70
-    if args.model == "extra-trees" and args.feature_set in {"all", "all-bollinger"}:
+        args.threshold = THRESHOLD if args.model in {"extra-trees", "ensemble-c"} else 0.70
+    if args.model in {"extra-trees", "ensemble-c"} and args.feature_set in {"all", "all-bollinger"}:
         for name, value in CANDIDATE_20260819_3.items():
             if name != "selection_scope":
                 setattr(args, name, value)
     args.risk_policy = bool(
         args.ticker.upper() in {"00631L", "00631L.TW"}
-        and args.model == "extra-trees" and args.feature_set in {"all", "all-bollinger"})
+        and args.model in {"extra-trees", "ensemble-c"}
+        and args.feature_set in {"all", "all-bollinger"})
     if not 0.10 <= args.final_test <= 0.40:
         raise SystemExit("--final-test must be between 0.10 and 0.40")
     if args.horizon < 1 or args.folds < 2 or not 0 < args.threshold < 1:
@@ -1829,8 +1923,9 @@ def main() -> int:
 
     # Refit/calibrate on all labelled history only after final evaluation, solely for today's probability.
     latest = data.iloc[[-1]].copy()
-    latest_probability = float(calibrated_fit_predict(
-        usable, latest, features, args.horizon, args.model)[0][0])
+    latest_probabilities, latest_model_metadata, _latest_calibrator = calibrated_fit_predict(
+        usable, latest, features, args.horizon, args.model)
+    latest_probability = float(latest_probabilities[0])
     latest_predicted_return, latest_return_low, latest_return_high = return_fit_predict(
         usable, latest, features)
     latest_predicted_return = float(latest_predicted_return[0])
@@ -1972,7 +2067,8 @@ def main() -> int:
     required_validation["intraday_entry_filter"] = intraday_research
     result = clean_json({
         "ticker": args.ticker, "model": args.model, "feature_set": args.feature_set,
-        "model_version": (BOLLINGER_CANDIDATE_MODEL_VERSION
+        "model_version": (CANDIDATE_C_MODEL_VERSION if args.model == "ensemble-c" else
+                          BOLLINGER_CANDIDATE_MODEL_VERSION
                           if args.model == "extra-trees" and args.feature_set == "all-bollinger" else
                           CANDIDATE_B_MODEL_VERSION if args.label_mode == "trade-outcome" else
                           MODEL_VERSION if args.model == "extra-trees" else
@@ -2011,6 +2107,8 @@ def main() -> int:
                                "trading_return_forecast_validation_passed":
                                    trade_forecast_validation_passed,
                                "activated": executable},
+        "candidate_c": ({"enabled": True, **latest_model_metadata}
+                        if args.model == "ensemble-c" else {"enabled": False}),
         "research_price_model": {
             "version": RESEARCH_MODEL_VERSION,
             "candidates": list(RESEARCH_RETURN_CANDIDATES),
@@ -2091,7 +2189,9 @@ def main() -> int:
         print(f"目前機率仍低於門檻 {abs(margin):.1f} 個百分點；維持觀望")
     if holding is not None:
         print("持股提醒：買進條件是新部位訊號，不代表既有持股必須加碼")
-    model_zh = "ExtraTrees 完整技術指標版" if args.model == "extra-trees" else "Logistic 基準版"
+    model_zh = ({"extra-trees": "ExtraTrees 完整技術指標版",
+                 "ensemble-c": "候選 C－時間序列校準集成模型"}
+                .get(args.model, "Logistic 基準版"))
     features_zh = ({"all": "全技術指標", "all-bollinger": "全技術指標＋布林帶研究候選"}
                    .get(args.feature_set, "基礎特徵"))
     print(f"模型版本：{model_zh}；{features_zh}")

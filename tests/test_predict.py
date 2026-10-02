@@ -468,6 +468,28 @@ def test_return_model_produces_ordered_price_interval():
     assert (median <= high).all()
 
 
+def test_candidate_c_selects_weights_inside_training_and_ignores_test_labels():
+    rng = np.random.default_rng(20261003)
+    idx = pd.date_range("2020-01-01", periods=360, freq="B")
+    x1 = rng.normal(size=len(idx))
+    x2 = rng.normal(size=len(idx))
+    label = (x1 + .25 * x2 + rng.normal(scale=.8, size=len(idx)) > 0).astype(float)
+    rows = pd.DataFrame({"x1": x1, "x2": x2, "label": label}, index=idx)
+    train, test = rows.iloc[:320], rows.iloc[320:].copy()
+    probability, metadata, _ = predict.calibrated_fit_predict(
+        train, test, ["x1", "x2"], 5, "ensemble-c")
+    changed = test.copy()
+    changed["label"] = 1 - changed["label"]
+    changed_probability, changed_metadata, _ = predict.calibrated_fit_predict(
+        train, changed, ["x1", "x2"], 5, "ensemble-c")
+    assert np.isfinite(probability).all()
+    assert ((0 <= probability) & (probability <= 1)).all()
+    np.testing.assert_allclose(probability, changed_probability)
+    assert metadata["weights"] == changed_metadata["weights"]
+    assert np.isclose(sum(metadata["weights"].values()), 1)
+    assert metadata["selection_scope"].startswith("僅使用外層")
+
+
 def test_record_prediction_rejects_nan_market_price_before_sqlite_write(tmp_path):
     result = {"latest_price": float("nan")}
     with np.testing.assert_raises_regex(ValueError, "market_price must be"):

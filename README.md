@@ -5,7 +5,9 @@ walk-forward 樣本外驗證，以及包含交易成本的交易模擬。
 
 預設使用 ExtraTrees 完整技術指標版，包含價格趨勢、波動度、RSI、價量、KD、MACD、
 20／60日支撐壓力，以及可取得時的台積電與台灣大盤同步資訊。原本的 Logistic 模型
-及 `--feature-set baseline` 基礎特徵仍保留作研究比較。
+及 `--feature-set baseline` 基礎特徵仍保留作研究比較。候選 C 可用
+`--model ensemble-c` 重現；它集成 ExtraTrees、Logistic 與 HistGradientBoosting，
+但 2026-10-03 完整驗證未達升格標準，因此不是每日正式預設。
 所有技術指標只使用訊號當日及更早的資料。
 
 > 本工具僅供研究，不構成投資建議。模型出現訊號不代表未來一定獲利。
@@ -289,7 +291,7 @@ balanced accuracy、區間覆蓋率與寬度。MAE 必須至少優於零報酬�
 | `--horizon` | 預測及最長持有交易日數 | `5` |
 | `--target` | 分類標籤要求的最低漲幅 | `0.04` |
 | `--adverse` | 預測期間容許的最大不利跌幅 | `-0.025` |
-| `--threshold` | 產生買進訊號的最低機率 | ExtraTrees `0.22`；Logistic `0.70` |
+| `--threshold` | 產生買進訊號的最低機率 | ExtraTrees／候選 C `0.15`；Logistic `0.70` |
 | `--folds` | walk-forward 驗證折數 | `5` |
 | `--final-test` | 完全保留的最終測試比例 | `0.20` |
 | `--stop-atr` | 停損 ATR 倍數 | `1.5` |
@@ -297,7 +299,7 @@ balanced accuracy、區間覆蓋率與寬度。MAE 必須至少優於零報酬�
 | `--entry-gap-low-atr` | 下一日開盤相對訊號收盤的最低 ATR 位移；負值代表低開 | CLI `0.15`；正式候選策略 `-0.25` |
 | `--entry-gap-high-atr` | 下一日開盤相對訊號收盤的最高 ATR 位移 | CLI `0.55`；正式候選策略 `0.25` |
 | `--feature-set` | `baseline` 基礎版、`all` 全指標正式版，或 `all-bollinger` 布林帶研究候選 | `all` |
-| `--model` | `extra-trees` 實驗升級版或 `logistic` 基準版 | `extra-trees` |
+| `--model` | `extra-trees` 正式預設、`logistic` 基準版，或 `ensemble-c` 研究候選 | `extra-trees` |
 | `--label-mode` | `trade-outcome` 每日預設 B 標籤；`legacy-target` 保留 A 基準 | `trade-outcome` |
 | `--database` | 追加保存預測紀錄的 SQLite 路徑 | `predictions.sqlite3` |
 | `--no-record` | 研究比較時不寫入 SQLite | 不啟用 |
@@ -375,6 +377,21 @@ B 將正類別定義為「下一交易日開盤符合成交區間，且依現行
 .venv/bin/python scripts/predict.py 00631L.TW --period 10y --folds 5 --feature-set baseline --no-record
 .venv/bin/python scripts/predict.py 00631L.TW --period max --folds 5 --feature-set all-bollinger --no-record
 ```
+
+若要重現候選 C 集成模型（不寫入正式 SQLite）：
+
+```bash
+.venv/bin/python scripts/predict.py 00631L.TW \
+  --period max --horizon 5 --target 0.04 --adverse -0.025 --folds 5 \
+  --context 0050.TW 2330.TW ^TWII \
+  --model ensemble-c --feature-set all --no-record \
+  --output-json candidate-c.json
+```
+
+候選 C 在每個外層 Walk-Forward 訓練窗口內，再依時間切成模型訓練、權重選擇及
+機率校準三段；外層測試資料不參與權重或校準。2026-10-03 的比較中，候選 C 雖將
+OOS 平均報酬由 -0.083R 改善為 0.021R，仍因 OOS PF 1.053、Brier 0.1674 及雙倍成本
+中位 EV_R -0.060R 未達門檻，所以保留研究用途，不取代 `extra-trees`。
 
 ## SQLite 預測紀錄
 
